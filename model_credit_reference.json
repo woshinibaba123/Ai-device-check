@@ -1,0 +1,26 @@
+{
+  "source": "用户提供的 CodeBuddy /model 截图",
+  "recorded_date": "2026-11-05",
+  "credits": {
+    "hy4free": "0.00",
+    "hy4std": "0.29",
+    "hy3": "0.00",
+    "hy3-x": "0.05",
+    "deepseek-v4.1-flash": "0.11",
+    "glm-5.3": "0.69",
+    "glm-5.3-flash": "0.08",
+    "glm-5.3-flashx": "0.19",
+    "glm-5.2": "0.79",
+    "space-bunny": "0.08",
+    "minimax-m3.1-flash": "0.08",
+    "minimax-m3-pay": "0.25",
+    "minimax-m2.7": "0.26",
+    "kimi-k3.1-pro-highspeed": "1.56",
+    "kimi-k3.1-pro": "0.97",
+    "kimi-k3-2": "1.62",
+    "kimi-k2.8-preview": "0.77",
+    "deepseek-v4-pro": "0.51",
+    "step-5-preview": "0.33",
+    "mimo-v2.6-pro": "0.13"
+  }
+}

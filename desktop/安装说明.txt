@@ -1,0 +1,21 @@
+巡测桌面版 1.1.0
+
+Mac：将“巡测.app”拖入 Applications。当前构建未配置开发者签名、公证，外部分发前需要完成签名与公证。
+Windows：运行 DeviceCheck-Windows-x64-Setup.exe，按安装向导操作。需要 Microsoft Edge WebView2 Runtime。
+
+界面、Python 运行时、Excel/PDF 依赖包含在程序中。
+自动化设备依赖仍需本机安装：Node.js、Android Studio / SDK、Java；源码编译另需 Flutter。
+iOS 自动化仅支持 Mac + Xcode；Windows 端支持 Android 自动化。
+
+初次配置 Appium：
+Mac：双击安装镜像中的“配置已安装应用环境.command”，或安装应用后在终端运行：
+/Applications/巡测.app/Contents/MacOS/DeviceCheck --setup-runtime
+Windows 从开始菜单运行“配置自动化环境”。配置完成后关闭并重新打开巡测桌面版。
+此操作从官方 npm 源安装项目专用 Appium 与平台驱动，不安装系统镜像、不代替用户接受 SDK 许可。
+
+数据目录：
+Mac：~/Library/Application Support/DeviceCheck
+Windows：%LOCALAPPDATA%\DeviceCheck
+配置日志：上述目录中的 desktop.log
+
+Mac ARM64 构建只能在 Apple Silicon 上运行；Intel Mac 需要在 Intel 环境另行构建。

@@ -1,0 +1,337 @@
+{
+  "cases": [
+    {
+      "title": "登录前配置：选择中国国家、中国数据中心、中文语言",
+      "precondition": "1. App已安装并可正常启动；2. 使用测试环境，登录配置页可选列表中包含“中国”国家/区域和“中国”数据中心。",
+      "description": "1. 启动App进入登录配置页，查看页面展示内容。\n2. 点击“国家或区域”，在选择列表中找到并选择“中国”。\n3. 点击“数据中心”，在可选列表中选择“中国”数据中心。\n4. 点击“语言”，在语言列表中选择“中文”。\n5. 点击“下一步”。",
+      "expected": "登录配置完成，国家/区域为中国、数据中心为中国、语言为中文，点击下一步后进入中文显示的登录页。",
+      "blocked_reason": "第 1 步：需初始化流程执行支持：启动App进入登录配置页属启动初始化动作，非从首页执行的业务动作；第 2 步：登录前配置页需初始化流程执行支持方可到达，非缺少控件定位（页面已有“国家或区域”等文字证据）；第 3 步：登录前配置页需初始化流程执行支持方可到达，非缺少控件定位；第 4 步：登录前配置页需初始化流程执行支持方可到达，非缺少控件定位；第 5 步：登录前配置流程（含“下一步”进入登录页）需初始化流程执行支持",
+      "priority": "P1",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "启动App进入登录配置页，查看页面展示内容。",
+          "expected": "页面展示“国家或区域”“数据中心”“语言”三个选项及“下一步”按钮，文案为中文。",
+          "number": 1,
+          "automation_status": "unbound",
+          "automation_reason": "需初始化流程执行支持：启动App进入登录配置页属启动初始化动作，非从首页执行的业务动作"
+        },
+        {
+          "action": "点击“国家或区域”，在选择列表中找到并选择“中国”。",
+          "expected": "选择成功后返回配置页，“国家或区域”项显示为中国。",
+          "number": 2,
+          "automation_status": "unbound",
+          "automation_reason": "登录前配置页需初始化流程执行支持方可到达，非缺少控件定位（页面已有“国家或区域”等文字证据）"
+        },
+        {
+          "action": "点击“数据中心”，在可选列表中选择“中国”数据中心。",
+          "expected": "选择成功后“数据中心”项显示为中国。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "登录前配置页需初始化流程执行支持方可到达，非缺少控件定位"
+        },
+        {
+          "action": "点击“语言”，在语言列表中选择“中文”。",
+          "expected": "选择成功后“语言”项显示为中文。",
+          "number": 4,
+          "automation_status": "unbound",
+          "automation_reason": "登录前配置页需初始化流程执行支持方可到达，非缺少控件定位"
+        },
+        {
+          "action": "点击“下一步”。",
+          "expected": "进入登录页，登录页文案以中文显示。",
+          "number": 5,
+          "automation_status": "unbound",
+          "automation_reason": "登录前配置流程（含“下一步”进入登录页）需初始化流程执行支持"
+        }
+      ]
+    },
+    {
+      "title": "输入账号并使用账号密码方式登录成功",
+      "precondition": "1. 已按用例1完成中国数据中心与中文配置并进入登录页；2. 准备测试环境中有效的测试账号及对应密码。",
+      "description": "1. 在登录页点击账号输入框，输入准备好的测试账号。\n2. 点击“账号密码登录”，切换登录方式。\n3. 点击密码输入框，输入该账号的登录密码。\n4. 如首次登录弹出《用户协议》与《隐私政策》确认弹框，点击“同意并登录”；未弹出则直接进行下一步。\n5. 点击“登录”按钮，等待登录完成。",
+      "expected": "通过账号密码方式登录成功，进入App首页，底部展示“首页”“呼叫”“我的”等导航。",
+      "blocked_reason": "第 1 步：缺少测试账号数据：input 需要具体账号文本，测试账号未提供，不可虚构；第 3 步：适配规则不生成密码输入，密码输入需专用配置/数据支持；第 4 步：条件弹框（弹出与否需运行时判断），当前执行器缺少条件分支能力，无条件点击“同意并登录”可能误报",
+      "priority": "P1",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "在登录页点击账号输入框，输入准备好的测试账号。",
+          "expected": "账号输入框中正确显示所输入的账号。",
+          "number": 1,
+          "automation_status": "unbound",
+          "automation_reason": "缺少测试账号数据：input 需要具体账号文本，测试账号未提供，不可虚构"
+        },
+        {
+          "action": "点击“账号密码登录”，切换登录方式。",
+          "expected": "登录方式切换为账号密码登录，页面展示密码输入框。",
+          "number": 2,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "tap",
+              "value": "账号密码登录"
+            },
+            {
+              "action": "assert",
+              "value": "请输入登录密码"
+            }
+          ]
+        },
+        {
+          "action": "点击密码输入框，输入该账号的登录密码。",
+          "expected": "密码输入成功，密码按掩码或明文规则正常显示，无异常报错。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "适配规则不生成密码输入，密码输入需专用配置/数据支持"
+        },
+        {
+          "action": "如首次登录弹出《用户协议》与《隐私政策》确认弹框，点击“同意并登录”；未弹出则直接进行下一步。",
+          "expected": "协议确认后继续执行登录流程。",
+          "number": 4,
+          "automation_status": "unbound",
+          "automation_reason": "条件弹框（弹出与否需运行时判断），当前执行器缺少条件分支能力，无条件点击“同意并登录”可能误报"
+        },
+        {
+          "action": "点击“登录”按钮，等待登录完成。",
+          "expected": "登录成功，进入App首页，底部导航展示“首页”“呼叫”“我的”，页面无报错提示。",
+          "number": 5,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "tap",
+              "value": "登录"
+            },
+            {
+              "action": "wait",
+              "seconds": 5
+            },
+            {
+              "action": "assert",
+              "value": "首页"
+            },
+            {
+              "action": "assert",
+              "value": "我的"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "登录后从我的进入通用设置和语言设置页",
+      "precondition": "1. 已使用测试账号登录成功并停留在首页。",
+      "description": "1. 点击底部导航“我的”。\n2. 点击“通用设置”入口。\n3. 点击“语言”选项。",
+      "expected": "依次进入我的、通用设置、语言设置页，语言设置页当前选中项为中文。",
+      "blocked_reason": "第 3 步：部分受阻：“当前选中项为中文”的选中态断言缺少语言选项列表项文字的源码证据",
+      "priority": "P1",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "点击底部导航“我的”。",
+          "expected": "进入我的页面，页面功能入口以中文正常展示。",
+          "number": 1,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "tap",
+              "value": "我的"
+            },
+            {
+              "action": "assert",
+              "value": "通用设置"
+            }
+          ]
+        },
+        {
+          "action": "点击“通用设置”入口。",
+          "expected": "进入通用设置页，页面展示“语言”“账号管理”“消息通知”等设置项。",
+          "number": 2,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "tap",
+              "value": "通用设置"
+            },
+            {
+              "action": "assert",
+              "value": "语言"
+            },
+            {
+              "action": "assert",
+              "value": "账号管理"
+            },
+            {
+              "action": "assert",
+              "value": "消息通知"
+            }
+          ]
+        },
+        {
+          "action": "点击“语言”选项。",
+          "expected": "进入语言设置页，页面提示可切换当前应用语言，当前选中语言为中文。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "部分受阻：“当前选中项为中文”的选中态断言缺少语言选项列表项文字的源码证据"
+        }
+      ]
+    },
+    {
+      "title": "依次切换其他语言并验证切换生效",
+      "precondition": "1. 已登录并停留在语言设置页；2. 语言设置页展示大纲范围内可切换的语言选项列表。",
+      "description": "1. 在语言列表中选择第一个非中文语言。\n2. 返回上一页再重新进入语言设置页。\n3. 依次选择其余语言，每次切换后观察当前页面及返回后的页面文案。\n4. 全部语言验证完成后，选择回“中文”。",
+      "expected": "依次选择各个非中文语言后，应用界面文案即时切换为所选语言，切换过程无报错、无文案残留，最后可恢复中文。",
+      "blocked_reason": "第 1 步：“第一个非中文语言”为列表项运行时数据，源码labels无语言选项文字，需采集语言列表页面后定位；第 2 步：重新进入路径入口文字取决于步骤1所选语言（选项未确定），无法确定定位值；第 3 步：其余语言选项文字均无源码证据，需采集语言列表运行时选项后逐步绑定；第 4 步：“中文”选项文字不在源码labels中，缺少选项级定位证据，需运行时采集",
+      "priority": "P1",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "在语言列表中选择第一个非中文语言。",
+          "expected": "该语言选中生效，语言设置页及页面文案即时切换为所选语言显示。",
+          "number": 1,
+          "automation_status": "unbound",
+          "automation_reason": "“第一个非中文语言”为列表项运行时数据，源码labels无语言选项文字，需采集语言列表页面后定位"
+        },
+        {
+          "action": "返回上一页再重新进入语言设置页。",
+          "expected": "重新进入后语言选项仍保持上一步所选语言，说明选择已被保存。",
+          "number": 2,
+          "automation_status": "unbound",
+          "automation_reason": "重新进入路径入口文字取决于步骤1所选语言（选项未确定），无法确定定位值"
+        },
+        {
+          "action": "依次选择其余语言，每次切换后观察当前页面及返回后的页面文案。",
+          "expected": "每选择一种语言，界面文案均即时切换为对应语言，各页面无乱码、无翻译残留或闪退。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "其余语言选项文字均无源码证据，需采集语言列表运行时选项后逐步绑定"
+        },
+        {
+          "action": "全部语言验证完成后，选择回“中文”。",
+          "expected": "界面恢复为中文显示，语言设置页当前选中项为中文。",
+          "number": 4,
+          "automation_status": "unbound",
+          "automation_reason": "“中文”选项文字不在源码labels中，缺少选项级定位证据，需运行时采集"
+        }
+      ]
+    },
+    {
+      "title": "切换语言后返回验证全局语言显示",
+      "precondition": "1. 已在语言设置页完成语言切换并恢复为中文。",
+      "description": "1. 从语言设置页返回通用设置页。\n2. 从通用设置页返回我的页面。\n3. 再次进入通用设置-语言，确认当前语言选项。",
+      "expected": "语言选择为全局生效，返回各层级页面后文案均与所选语言一致，返回路径正常。",
+      "blocked_reason": "第 3 步：部分受阻：确认“当前语言选项”选中值需语言选项列表项文字证据，待运行时采集",
+      "priority": "P2",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "从语言设置页返回通用设置页。",
+          "expected": "通用设置页文案以当前所选语言显示，返回过程正常无异常。",
+          "number": 1,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "back"
+            },
+            {
+              "action": "assert",
+              "value": "通用设置"
+            }
+          ]
+        },
+        {
+          "action": "从通用设置页返回我的页面。",
+          "expected": "我的页面文案同样以当前所选语言显示，与语言设置保持一致。",
+          "number": 2,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "back"
+            },
+            {
+              "action": "assert",
+              "value": "我的"
+            }
+          ]
+        },
+        {
+          "action": "再次进入通用设置-语言，确认当前语言选项。",
+          "expected": "语言设置页显示的当前语言与页面实际文案语言一致。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "部分受阻：确认“当前语言选项”选中值需语言选项列表项文字证据，待运行时采集"
+        }
+      ]
+    },
+    {
+      "title": "退出登录账号",
+      "precondition": "1. 已使用测试账号登录成功；2. 语言已恢复为中文（或保持大纲要求语言）；3. 使用测试环境，允许执行退出登录操作。",
+      "description": "1. 点击底部导航“我的”，再点击“通用设置”。\n2. 点击“账号管理”。\n3. 点击“退出登录”。\n4. 在确认弹框中点击确认退出。\n5. 在登录页观察页面状态。",
+      "expected": "退出登录成功，返回登录页，需重新登录才能再次进入App。",
+      "blocked_reason": "第 2 步：部分受阻：账号管理页内账号信息与“退出登录”入口无源码文字证据，页内断言待采集；第 3 步：登出未接入专用执行流程，需登出专用适配；“退出登录”控件亦无源码文字证据；第 4 步：登出未接入专用执行流程，确认弹框操作需登出专用适配；第 5 步：依赖步骤3-4登出专用适配完成后方可到达登录页执行断言",
+      "priority": "P1",
+      "plan": null,
+      "business_steps": [
+        {
+          "action": "点击底部导航“我的”，再点击“通用设置”。",
+          "expected": "进入通用设置页，各设置项正常展示。",
+          "number": 1,
+          "automation_status": "candidate",
+          "automation_reason": "",
+          "automation_steps": [
+            {
+              "action": "tap",
+              "value": "我的"
+            },
+            {
+              "action": "tap",
+              "value": "通用设置"
+            },
+            {
+              "action": "assert",
+              "value": "语言"
+            },
+            {
+              "action": "assert",
+              "value": "账号管理"
+            }
+          ]
+        },
+        {
+          "action": "点击“账号管理”。",
+          "expected": "进入账号管理页，展示当前登录账号信息及“退出登录”入口。",
+          "number": 2,
+          "automation_status": "unbound",
+          "automation_reason": "部分受阻：账号管理页内账号信息与“退出登录”入口无源码文字证据，页内断言待采集"
+        },
+        {
+          "action": "点击“退出登录”。",
+          "expected": "弹出退出确认弹框，提示用户确认退出操作。",
+          "number": 3,
+          "automation_status": "unbound",
+          "automation_reason": "登出未接入专用执行流程，需登出专用适配；“退出登录”控件亦无源码文字证据"
+        },
+        {
+          "action": "在确认弹框中点击确认退出。",
+          "expected": "退出成功，返回登录页，账号登录态已清除。",
+          "number": 4,
+          "automation_status": "unbound",
+          "automation_reason": "登出未接入专用执行流程，确认弹框操作需登出专用适配"
+        },
+        {
+          "action": "在登录页观察页面状态。",
+          "expected": "登录页为未登录状态，需重新输入账号密码才能登录进入App。",
+          "number": 5,
+          "automation_status": "unbound",
+          "automation_reason": "依赖步骤3-4登出专用适配完成后方可到达登录页执行断言"
+        }
+      ]
+    }
+  ]
+}
