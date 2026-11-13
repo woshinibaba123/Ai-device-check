@@ -9,7 +9,7 @@ class ExcelAITests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.path=Path(self.tmp.name)/'cases.xlsx';fixture(self.path)
         self.book=case_workbook.read(self.path)
-        self.options={'path':str(self.path),'fingerprint':excel_ai.fingerprint(self.book),'sheet':'手机全量','priority':'P1','plans':{}}
+        self.options={'path':str(self.path),'fingerprint':excel_ai.fingerprint(self.book),'sheet':'手机全量','priority':'P1','plans':{},'optimize':False,'observation_mode':False}
         self.cache=patch.object(excel_ai,'CACHE',Path(self.tmp.name)/'plans');self.cache.start();self.addCleanup(self.cache.stop)
     def generate(self,responder=None):
         def response(cfg,progress):
@@ -49,6 +49,25 @@ class ExcelAITests(unittest.TestCase):
         self.assertEqual([r['id'] for r in results],['手机全量:6','手机全量:7'])
         target=Path(self.tmp.name)/'executed.xlsx';case_workbook.annotate(book,results,target)
         with zipfile.ZipFile(target) as z:self.assertEqual(z.read('xl/worksheets/sheet1.xml').decode().count('>pass<'),2)
+
+    def test_old_generation_rules_require_regeneration(self):
+        result=self.generate();path=excel_ai.CACHE/(result['excel_plan_id']+'.json')
+        data=json.loads(path.read_text());data.pop('binding_schema');path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,'匹配规则已更新'):
+            excel_ai.apply(self.book,dict(self.options,ai_plan_id=result['excel_plan_id']))
+
+    def test_observation_rule_is_saved_into_generated_plans(self):
+        self.options['observation_mode']=True
+        result=self.generate()
+        import excel_execution_policy
+        self.assertEqual(result['execution_policy'],excel_execution_policy.POLICY)
+        for row in result['cases']:
+            self.assertEqual(row['plan']['execution_policy'],excel_execution_policy.POLICY)
+        merged=excel_ai.apply(self.book,dict(self.options,ai_plan_id=result['excel_plan_id']))
+        plans=case_runner.preview(merged,self.options)['cases']
+        self.assertTrue(all(c['plan']['execution_policy']==excel_execution_policy.POLICY for c in plans))
+        with self.assertRaisesRegex(ValueError,'执行规则已变化'):
+            excel_ai.apply(self.book,dict(self.options,ai_plan_id=result['excel_plan_id'],observation_mode=False))
 
     def test_workbook_or_filter_change_rejects_stale_plan(self):
         r=self.generate();options=dict(self.options,ai_plan_id=r['excel_plan_id'])

@@ -6,6 +6,40 @@ from test_automation import FakeDriver
 from automation import Explorer
 
 class AuthCasesTests(unittest.TestCase):
+    def test_generation_prompt_has_one_auth_policy(self):
+        doc={'cases':[{'title':'登录页校验','expected':'仍在登录页','business_steps':[{'action':'输入密码','expected':'仍在登录页'}]}]}
+        reply={'bindings':[{'case_id':1,'start_state':'login','steps':[{'business_step':1,'operations':[{'action':'input_local','by':'field','value':'password','text':'password'},{'action':'assert_route','value':'/login'}]}]}]}
+        with patch.object(bridge,'ask',return_value=reply) as ask:
+            bridge.generate({'outline':'匹配登录测试','binding_only':True,'strict_excel':True,'document':doc})
+        prompt=ask.call_args.args[0]
+        self.assertNotIn('自动登录另行配置，不生成密码输入',prompt)
+        self.assertNotIn('通用操作不直接处理密码',prompt)
+        self.assertIn('每条binding必须声明start_state',prompt)
+        self.assertIn('input_local',prompt)
+        self.assertIn('打开“国家或区域/数据中心/语言”选择器不是已选择值',prompt)
+
+    def test_incomplete_config_is_partial_and_starts_before_login(self):
+        import excel_ai
+        doc=bridge.business_document({'cases':[{'title':'中国数据中心账号密码登录成功','expected':'登录成功',
+            'business_steps':[{'action':'首次启动，国家选择中国、数据中心选择中国、语言选择当前目标语言。','expected':'配置正确'}]}]})
+        ops=[{'action':'assert_route','value':'/loginConfig'}]+[{'action':'tap','value':v} for v in ['国家或区域','数据中心','语言','下一步']]
+        row=bridge.apply_bindings(doc,{'bindings':[{'case_id':1,'steps':[{'business_step':1,'operations':ops}]}]})['cases'][0]
+        self.assertIsNone(row['plan'])
+        self.assertEqual(row['business_steps'][0]['automation_status'],'partial')
+        self.assertIn('缺少目标选项',row['blocked_reason'])
+        self.assertIn('缺少选中值',row['blocked_reason'])
+        self.assertEqual(excel_ai.partial_candidate(row)['start_state'],'login_config')
+
+    def test_open_login_page_does_not_complete_login(self):
+        step={'action':'启动App，完成中国数据中心与登录。'}
+        issues=bridge.binding_coverage_issues(step,[{'action':'assert_route','value':'/login'}])
+        self.assertTrue(any('缺少登录提交' in reason for reason in issues))
+        self.assertEqual(bridge.infer_start_state({'title':'切换为中文简体','business_steps':[step]}),'login_config')
+
+    def test_leading_auth_assertion_corrects_home_start(self):
+        state=bridge.binding_start_state({'title':'配置核验'}, {'start_state':'home','steps':[{'business_step':1,'operations':[{'action':'assert_route','value':'/loginConfig'}]}]})
+        self.assertEqual(state,'login_config')
+
     def test_credentials_require_auth_state_and_valid_slot(self):
         step={'action':'input_local','value':'密码','text':'password'}
         with self.assertRaises(ValueError):runner.validate_plan({'steps':[step]})

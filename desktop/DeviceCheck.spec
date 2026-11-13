@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 from PyInstaller.utils.hooks import collect_data_files
 base=Path(SPECPATH).parent
-assets=[(str(base/name),'.') for name in ('index.html','catalog.json','model_credit_reference.json')]
+assets=[(str(base/name),'.') for name in ('index.html','parsed_cases.js','catalog.json','model_credit_reference.json')]
 assets+=collect_data_files('webview')
 a=Analysis([str(base/'desktop_main.py')],pathex=[str(base)],datas=assets,
     hiddenimports=['webview','pdf_report','windows_credentials','desktop.setup_runtime'],

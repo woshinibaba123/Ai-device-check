@@ -10,6 +10,37 @@ from unittest.mock import patch
 from xml.sax.saxutils import escape
 
 class SourceFlowTests(unittest.TestCase):
+    def test_relative_controller_api_and_custom_input_instances(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            files={'pubspec.yaml':'name: example',
+                   'lib/routes/routers.dart':"static const login='/login'; GetPage(name: login, page: () => LoginPage())",
+                   'lib/http/request_api.dart':"static const save='/api/test/save';",
+                   'lib/http/repository/account_repository.dart':"class AccountRepository {\n  save() { DioUtil.post(RequestApi.save); }\n}",
+                   'lib/login/controller.dart':"import '../http/repository/account_repository.dart'; void submit() { AccountRepository().save(); }",
+                   'lib/login/page.dart':"import 'controller.dart'; class LoginPage { void build() { InputTxtWidget(title:'account'.tr, hint:'account_hint'.tr); InputTxtWidget(title:'password'.tr, isPass:true); _buildInputField(label:'other'.tr); } Widget _buildInputField({String label}) { return TextField(); } }"}
+            for file,text in files.items():
+                path=root/file;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text)
+            page=flow_planner.source_index(root)['pages'][0]
+            self.assertEqual([api['path'] for api in page['api_candidates']],['/api/test/save'])
+            custom=[field for field in page['inputs'] if field['widget']=='InputTxtWidget']
+            self.assertEqual(len(custom),2);self.assertTrue(custom[1]['secure'])
+            helpers=[field for field in page['inputs'] if field['widget']=='_buildInputField']
+            self.assertEqual(len(helpers),1)
+
+    def test_callback_navigation_does_not_borrow_previous_sibling_label(self):
+        import source_navigation
+        text="""class Page {
+  Widget build() { return Column(children: [
+    ItemTxtWidget(text:'business'.tr, onTap: () { Get.toNamed(Routers.business); }),
+    ItemTxtWidget(text:'queue'.tr, onTap: () { _openQueue(); }),
+  ]); }
+  void _openQueue() async { Get.toNamed(Routers.queue); }
+  void _unlabeled() { Get.toNamed(Routers.unknown); }
+}"""
+        self.assertEqual(source_navigation.navigation_label_keys(text,text.index('Get.toNamed(Routers.queue)')),['queue'])
+        self.assertEqual(source_navigation.navigation_label_keys(text,text.index('Get.toNamed(Routers.unknown)')),[])
+
     def test_source_methods_inputs_and_save_on_return_are_evidence_bearing(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)
@@ -172,6 +203,27 @@ class AISummaryTests(unittest.TestCase):
         self.assertIn('Sprache',index['pages'][0]['labels'][0]['labels'])
 
 class EvidenceBudgetRegressionTests(unittest.TestCase):
+    def test_login_and_post_login_language_pages_are_kept_together(self):
+        pages=[{'path':'/loginConfig','name':'loginConfig','labels':[{'labels':['国家或区域']}]} ,
+               {'path':'/login','name':'login','labels':[{'labels':['账号','密码']}],'inputs':[{'widget':'InputTxtWidget'}]},
+               {'path':'/language','name':'language','labels':[{'labels':['语言']}],'entry_candidates':[{'steps':['我的','通用设置','语言']}]},
+               {'path':'/my/currency','name':'myCurrency','labels':[{'labels':['通用设置']}]}]
+        pages += [{'path':'/login/noise'+str(i),'name':'noise'+str(i),'labels':[{'labels':['登录','密码','账号','协议']}]} for i in range(25)]
+        summary=flow_planner.ai_summary({'project':'/tmp','pages':pages},'首次启动，账号密码登录；我的→通用设置→语言，选择中文简体',max_chars=3600)
+        self.assertTrue({'/loginConfig','/login','/language','/my/currency'} <= {p['path'] for p in summary['pages']})
+
+    def test_target_api_navigation_and_business_codes_survive_budget(self):
+        api={'http_method':'POST','path':'/api/test/save'}
+        page={'name':'form','path':'/form','labels':[{'labels':['noise'*1000]}],
+              'api_candidates':[api],'entry_candidates':[{'steps':['我的','表单']}],
+              'inputs':[{'labels':[{'key':'name','labels':['名称']}]}]}
+        index={'project':'/tmp','pages':[page],'business_success_codes':[610000]}
+        result=flow_planner.ai_summary(index,'打开/form，填写名称保存',max_chars=1800)
+        self.assertEqual(result['business_success_codes'],[610000])
+        self.assertEqual(result['pages'][0]['api_candidates'],[api])
+        self.assertEqual(result['pages'][0]['entry_candidates'],page['entry_candidates'])
+        self.assertLessEqual(len(json.dumps(result,ensure_ascii=False)),1800)
+
     def test_login_config_controls_survive_protocol_pages_and_large_route_overview(self):
         import tempfile,json
         with tempfile.TemporaryDirectory() as tmp:

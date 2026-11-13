@@ -8,7 +8,7 @@ LOGIN='<hierarchy><node class="android.widget.EditText" package="com.example"/><
 
 class FakeDriver:
     def __init__(self,login=False):self.state='login' if login else 'A';self.clicked=[];self.elements={};self.typed=[]
-    def source(self):return LOGIN if self.state=='login' else A if self.state=='A' else B
+    def source(self):return LOGIN if self.state=='login' else A.replace('</hierarchy>', '<node class="android.widget.TextView" package="com.example" content-desc="首页"/></hierarchy>') if self.state=='A' else B
     def __call__(self,method,path,data=None):
         if path.endswith('/source'):return self.source()
         if path.endswith('/element'):
@@ -106,6 +106,7 @@ class CredentialReportTests(unittest.TestCase):
         driver=FakeDriver(login=True)
         def call(method,path,data=None):
             if path=='/session':return {'sessionId':'s'}
+            if path.endswith('/appium/settings'):return {}
             if path.endswith('/screenshot'):return 'aGVsbG8='
             if method=='DELETE':return None
             return driver(method,path,data)
@@ -124,6 +125,7 @@ class CredentialReportTests(unittest.TestCase):
         driver=FakeDriver(login=True)
         def call(method,path,data=None):
             if path=='/session':return {'sessionId':'s'}
+            if path.endswith('/appium/settings'):return {}
             if path.endswith('/screenshot'):self.fail('failed login screenshot')
             if method=='DELETE':return None
             return driver(method,path,data)
@@ -197,7 +199,7 @@ class SourceCoverageTests(unittest.TestCase):
             if path.endswith('/screenshot'):return 'aGVsbG8='
         with tempfile.TemporaryDirectory() as tmp,patch.object(app,'ROOT',Path(tmp)),patch.object(app,'request',call),patch.object(app,'raw_request'):
             app.JOBS['dedup']={'logs':[],'screenshots':[],'status':'running'}
-            app.run_job('dedup',{'platform':'Android','device':'mock','bundle':'com.example','steps':[{'action':'screenshot'},{'action':'screenshot'}]})
+            app.run_job('dedup',{'platform':'Android','device':'mock','bundle':'com.example','screenshot_policy':'all','steps':[{'action':'screenshot'},{'action':'screenshot'}]})
             self.assertEqual(len(app.JOBS['dedup']['screenshots']),1)
             self.assertEqual(app.JOBS['dedup']['status'],'passed')
 
@@ -397,14 +399,16 @@ class TabFrontierTests(unittest.TestCase):
         self.assertTrue(any(edge['action']=='revisit' for edge in result['transitions']))
 
 class NativeInputTests(unittest.TestCase):
-    def test_driver_manages_input_method_and_fresh_element(self):
+    def test_direct_replacement_uses_fresh_element_without_adb_ime(self):
         from unittest.mock import Mock,patch
         driver=Mock(side_effect=lambda method,path,data=None: {ELEMENT:'fresh'} if path.endswith('/element') else True)
         exp=Explorer(driver,'s','Android',lambda x:None,lambda *args:None,shell=Mock())
         node={'path':'/hierarchy/node[1]','bounds':'[10,10][100,60]','label':''}
         with patch('automation.time.sleep'):exp.type('stale','test-value',node)
         payloads=[call.args[2] for call in driver.call_args_list if len(call.args)>2]
-        self.assertIn({'script':'mobile: type','args':[{'text':'test-value'}]},payloads)
+        self.assertIn({'script':'mobile: replaceElementValue','args':[{'elementId':'fresh','text':'test-value'}]},payloads)
+        self.assertFalse(any(p.get('script')=='mobile: type' for p in payloads if isinstance(p,dict)))
+        self.assertFalse(any(c.args[1].endswith('/clear') for c in driver.call_args_list))
         exp.shell.assert_not_called()
 
 class StableNavigationBudgetTests(unittest.TestCase):

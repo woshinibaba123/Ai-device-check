@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "module": "H5 · 页面与记录",
+  "flows": [
+    {
+      "id": "h5-report",
+      "name": "运行报告 · 查看与返回",
+      "parameters": [
+        {
+          "key": "store",
+          "label": "门店名称",
+          "default": "塘人｜创意本帮菜(奥特莱斯店)"
+        }
+      ],
+      "route": "/reportRecord",
+      "sources": [
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/reportRecord/index.vue"
+      ],
+      "steps": [
+        "从 App 首页或当前角色实际可见的运行报告入口进入，不强制先进入某个门店。",
+        "通过 App 中实际可见的「运行报告」入口进入 H5 页面；入口不可见则记录受阻，不猜坐标。",
+        "核对 /reportRecord 的统计汇总、业务类型和当前可见筛选、加载/空态及权限提示；不预设为记录列表。",
+        "检查可见统计区块，切换实际支持的日期或业务类型；仅在有详情入口时查看详情，不寻找不存在的第一条记录。",
+        "通过页面返回入口返回 App，并核对当前门店上下文。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    },
+    {
+      "id": "h5-running",
+      "name": "运行日周报 · 图表与日期查看",
+      "parameters": [
+        {
+          "key": "store",
+          "label": "门店名称",
+          "default": "塘人｜创意本帮菜(奥特莱斯店)"
+        }
+      ],
+      "route": "/running",
+      "sources": [
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/running/index.vue"
+      ],
+      "steps": [
+        "进入门店列表，搜索并进入「{{store}}」，按用户策略选择第一张搜索结果并记录实际门店名称。",
+        "通过 App 中实际可见的「运行记录」入口进入 H5 页面；入口不可见则记录受阻，不猜坐标。",
+        "核对实际路由 /running、日报/周报页签及可见统计图表、单位和权限/空态；该页面不是通用任务记录列表。",
+        "切换可见的日报、周报和日期并回读统计范围；无列表/详情入口时不执行列表或详情步骤。",
+        "通过页面返回入口返回 App，并核对当前门店上下文。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    },
+    {
+      "id": "h5-store-map",
+      "name": "门店地图 · 查看与返回",
+      "parameters": [],
+      "route": "/storeMap",
+      "sources": [
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/storeMap/Index.vue"
+      ],
+      "steps": [
+        "从 App 首页点击「附近门店」，不先搜索并进入某个门店。",
+        "记录实际地图、定位授权、城市、标记和加载/空/错误状态；定位失败不循环授权。",
+        "通过真实地图/列表切换入口检查附近门店；仅操作当前提供的筛选。",
+        "选择实际标记或门店卡片，核对摘要；有详情入口才查看，随后返回地图。",
+        "返回 App 首页，不启动外部导航或拨号。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    },
+    {
+      "id": "h5-study",
+      "name": "学习中心 · 当前课程页查看与返回",
+      "parameters": [],
+      "sources": [
+        "app:lib/utils/web_util.dart#urlLearning"
+      ],
+      "steps": [
+        "从 App 首页点击学习中心，记录真实页面标题和路由；当前 App 入口指向 /sub-app/study/courseCenter/list，超级角色可能带 /webos 前缀。",
+        "按实际可见的课程分类、搜索、课程卡片检查加载、空状态及错误；不存在的项目记录未提供。",
+        "打开一条实际可见课程/资料；仅当播放器存在时验证播放暂停，返回后核对列表状态。",
+        "不得强制跳到旧版 /study、机型选择、解决方案或ROI；只有当前页面实际提供入口时单独记录该分支。",
+        "返回 App 首页；权限不足或新版源码不可用时明确记录验证范围。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    },
+    {
+      "id": "h5-message",
+      "name": "消息中心 · 查看与返回",
+      "parameters": [],
+      "route": "/message",
+      "sources": [
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/message/Index.vue"
+      ],
+      "steps": [
+        "从 App 底部「消息」导航进入，先识别原生消息入口及实际分类，不先进入门店。",
+        "打开当前可见消息分类；仅在真实进入 H5 /message 时检查对应消息列表。",
+        "核对分类、未读标识、时间及空态；页面不提供未读/已读筛选时不寻找该筛选。",
+        "只通过真实「查看详情」打开有链接的消息；只有「我知道了」的消息不强制寻找详情。操作可能更新已读状态，记录实际结果。",
+        "通过页面返回入口返回 App，并核对当前门店上下文。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    },
+    {
+      "id": "h5-repair-list",
+      "name": "报修 · 表单查看与返回（列表仅条件检查）",
+      "parameters": [],
+      "route": "/repairForm",
+      "sources": [
+        "app:lib/utils/web_util.dart",
+        "h5:src/pages/report/views/repairForm/index.vue",
+        "h5:src/pages/report/views/repairForm/list.vue"
+      ],
+      "steps": [
+        "从 App 首页点击报修，直接检查实际打开的表单，不先进入门店列表。",
+        "当前环境直接进入 /repairForm，核对标题、字段、必填、协议和提交按钮；不寻找工单列表、新增按钮或列表分页。",
+        "仅当实际进入 /repairList 时核对列表/空态和可见状态页签，再通过新增进入表单；未出现该分支不判通过。",
+        "自动生成表单测试数据并填写必填字段，选择实际有效设备和问题类型，核对协议后点击提交；核对成功结果和新增工单，结果不明不重复提交。",
+        "提交结果核对后返回 App，保留新增工单供复核。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": false
+    },
+    {
+      "id": "h5-hotel-task",
+      "name": "酒店任务记录 · 查看与返回",
+      "parameters": [
+        {
+          "key": "store",
+          "label": "门店名称",
+          "default": "塘人｜创意本帮菜(奥特莱斯店)"
+        }
+      ],
+      "route": "/hotelTask",
+      "sources": [
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/hotelTask/index.vue"
+      ],
+      "steps": [
+        "进入门店列表，搜索并进入「{{store}}」，按用户策略选择第一张搜索结果并记录实际门店名称。",
+        "通过 App 中实际可见的「酒店任务记录」入口进入 H5 页面；入口不可见则记录受阻，不猜坐标。",
+        "切换到 WebView，核对路由 /hotelTask；等待加载完成，记录标题、列表或空状态和错误提示。",
+        "操作可见日历和筛选，核对当前任务卡片、空态及实际字段；只有卡片提供详情入口时查看主/子任务，不能假设每条都有详情。",
+        "通过页面返回入口返回 App，并核对当前门店上下文。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    }
+  ]
+}

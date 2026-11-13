@@ -29,62 +29,43 @@ def build(job, root, output):
     text('平台：'+job.get('platform','未知')+'    任务：'+job.get('id',''))
     text('状态：'+{'passed':'已完成配置范围','review':'待复核','failed':'失败','blocked':'受阻','stopped':'已停止'}.get(job.get('status'),job.get('status','未知')))
     text('开始：'+job.get('started','')+'    结束：'+job.get('finished',''))
-    if job.get('language'):text('语言：'+json.dumps(job['language'],ensure_ascii=False))
-    for key,label in [('profile','模拟配置'),('actual_environment','实际环境')]:
-        if job.get(key):text(label+'：'+json.dumps(job[key],ensure_ascii=False))
-    x=job.get('exploration',{})
-    reasons={'return_mismatch':'返回后页面状态不一致（旧版在此停止）','reachable_controls_exhausted':'当前可达控件探索完毕','unreachable_pending_branches':'仍有入口未探索，返回路径恢复失败','action_limit':'达到操作次数上限','time_limit':'达到时间上限','no_accessible_controls':'未识别到交互控件','outside_app':'离开被测 App','page_tree_unavailable':'被测页面控件持续不可用，覆盖不完整','webview_context_failed':'无法恢复原生操作上下文，已停止探索','depth_limit':'达到深度上限','stopped':'用户停止','login_or_secure_form':'遇到登录或密码页','root_snapshot_unavailable':'首页路由已返回，但页面控件持续未就绪','startup_not_ready':'启动画面等待超时，首页未就绪','back_failed':'返回失败','popup_blocked':'弹窗未能关闭，需复核'}
-    if x:
-        text('探索结果',True)
-        text(f"页面状态 {len(x.get('pages',[]))} 个；操作 {x.get('actions',0)} 次；结束原因：{reasons.get(x.get('termination'),x.get('termination',''))}")
-        text(x.get('coverage_note',''))
-        if job.get('device','').startswith('emulator-') and not job.get('profile'):text('本次记录仅包含本机模拟器编号，未记录品牌机型，不能归为具体品牌机型测试。')
-        coverage=x.get('source_coverage',{})
-        if coverage.get('route_count'):
-            text('源码页面覆盖',True)
-            text('源码路由 '+str(coverage['route_count'])+' 个；观察到跳转 '+str(len(coverage.get('visited_routes',[])))+' 个。路由记录和页面展示均不代表业务测试通过。')
-            if coverage.get('route_details'):
-                names={'displayed':'已采集页面','observed':'仅观察到跳转','protected':'敏感输入已跳过','excluded':'按规则跳过','startup_unobserved':'启动流程未记录','not_observed':'本次未观察到'}
-                for route in coverage['route_details']:
-                    text(names.get(route['status'],route['status'])+'：'+route['path']+' · '+route.get('page','')+' · '+route['reason'])
-                text(coverage.get('h5_note',''))
-            else:
-                for route in coverage.get('visited_routes',[]):text('观察到：'+route)
-                for route in coverage.get('unvisited_routes',[]):text('本次未记录：'+route['path']+' · '+route.get('page','')+'（具体原因未逐项验证）')
-        for popup in x.get('popup_dismissals',[]):text('弹窗处理：'+json.dumps(popup,ensure_ascii=False))
-        for note in x.get('observations',[]):text('页面观察及所需条件：'+json.dumps(note,ensure_ascii=False))
-        for form in x.get('forms',[]):text('表单填写与提交：'+json.dumps(form,ensure_ascii=False))
-        for issue in x.get('issues',[]):
-            kind=issue.get('type',issue.get('action',''))
-            category='测试数据或表单适配' if kind=='auto_form' else '返回及恢复记录' if kind in ('back','popup_recovered','foreground_recovered') else '执行待复核'
-            text(category+'：'+json.dumps(issue,ensure_ascii=False))
-        skipped=x.get('skipped',[])
-        missing_labels={}
-        for skip in skipped:
-            if str(skip.get('reason','')).startswith('缺少可读标识'):
-                missing_labels.setdefault(str(skip.get('page','')),[]).append(str(skip.get('label','')))
-        reported_missing=set()
-        for skip in skipped:
-            page=str(skip.get('page',''))
-            if str(skip.get('reason','')).startswith('缺少可读标识'):
-                if page in reported_missing:continue
-                reported_missing.add(page)
-                labels=missing_labels[page]
-                detail='、'.join(labels[:5])+(' 等' if len(labels)>5 else '')
-                text('未覆盖：'+page+' 共 '+str(len(labels))+' 个控件缺少可读标识，需补充可访问性标识（'+detail+'）')
-            else:
-                text('未覆盖：'+json.dumps(skip,ensure_ascii=False))
-        for edge in x.get('transitions',[]):text('路径：'+json.dumps(edge,ensure_ascii=False))
-    text('执行日志',True)
-    for line in job.get('logs',[]):text(line,error=bool(ERROR_LOG.search(str(line))))
-    seen=set()
+    diagnostics=job.get('diagnostics') or {}
+    operator=job.get('ai_operator') or {}
+    text('异常记录',True)
+    issues=list(diagnostics.get('issues',[]))
+    issues+=list((job.get('exploration') or {}).get('issues',[]))
+    issues+=list(diagnostics.get('api_errors',[]))
+    screenshots={}
+    for issue in issues:
+        text('页面：'+str(issue.get('route') or issue.get('page') or '未取得页面标识'),error=True)
+        text(json.dumps(issue,ensure_ascii=False),error=True)
+        if issue.get('screenshot'):screenshots[issue['screenshot']]=issue.get('route') or issue.get('page') or '异常页面'
+    for record in job.get('screenshot_records',[]):
+        if record.get('abnormal'):screenshots[record['url']]=record.get('route') or record.get('page') or '异常页面'
+    # Legacy runs have no screenshot metadata; retain only explicitly named failures.
     for url in job.get('screenshots',[]):
-        if url in seen:continue
-        seen.add(url)
+        if re.search(r'failure|failed|error|blocked|/999[.]',url,re.I):screenshots.setdefault(url,'异常现场（历史记录未提供页面标识）')
+    abnormal_logs=[str(line) for line in job.get('logs',[]) if ERROR_LOG.search(str(line)) and not re.search(r'无异常|无错误|未发现异常|仅.*异常|异常.*截图|响应上限|未命中|无需',str(line))]
+    for line in dict.fromkeys(abnormal_logs):text(line,error=True)
+    if not issues and not abnormal_logs:text('未记录到异常；不代表所有业务检查均已通过。')
+    if operator.get('termination_detail'):text('执行结束原因：'+str(operator['termination_detail']),error=True)
+    text('页面耗时',True)
+    text('自动化观察值包含驱动等待；未观察到就绪的记录不代表加载成功。')
+    for group,label in [('navigation','页面切换'),('native_route_frames','原生首帧'),('webview_loads','WebView 加载')]:
+        for row in diagnostics.get(group,[]):text(label+'：'+json.dumps(row,ensure_ascii=False))
+    if not any(diagnostics.get(k) for k in ('navigation','native_route_frames','webview_loads')):text('本次未采集到页面耗时。')
+    text('操作耗时',True)
+    timed_steps=[step for step in operator.get('steps',[]) if step.get('timings')]
+    for step in timed_steps:
+        text('步骤 '+str(step.get('round',''))+' · 页面 '+str(step.get('route') or '未记录')+' · '+str(step.get('action',''))+' '+str(step.get('label') or '')+'：'+json.dumps(step['timings'],ensure_ascii=False))
+    if not timed_steps:
+        for line in job.get('logs',[]):
+            if str(line).startswith('操作耗时：'):text(line)
+    for url,page in screenshots.items():
         path=(root/url.lstrip('/')).resolve()
         if root.resolve() not in path.parents or not path.is_file():continue
-        story.append(PageBreak());text('页面截图 · '+path.stem,True)
-        image=Image(str(path));scale=min(475/image.imageWidth,650/image.imageHeight)
+        story.append(PageBreak());text('异常页面 · '+str(page),True)
+        image=Image(str(path));scale=min(475/image.imageWidth,620/image.imageHeight)
         image.drawWidth=image.imageWidth*scale;image.drawHeight=image.imageHeight*scale
         story.append(image)
     def footer(c,doc):

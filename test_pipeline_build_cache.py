@@ -9,7 +9,7 @@ class PipelineBuildCacheTests(unittest.TestCase):
             root=Path(tmp);source=root/'source';(source/'lib').mkdir(parents=True)
             (source/'lib/main.dart').write_text('void main(){}');(source/'pubspec.yaml').write_text('name: test')
             artifact=root/'original.apk';artifact.write_bytes(b'compiled-test-binary')
-            cfg={'platform':'Android','pipeline_id':'a'*32,'source':str(source),'entrypoint':'lib/main.dart','route_tracking':True,'source_plan':{},'http_manifest':{'response_fields':['data.saved']},'flow_index':{'project':str(root/'temporary-clone')},'login':{'password':'TOP_SECRET_PWD'}}
+            cfg={'platform':'Android','pipeline_id':'a'*32,'source':str(source),'entrypoint':'lib/main.dart','route_tracking':True,'source_plan':{},'http_manifest':{'response_fields':['data.saved']},'diagnostic_schema':'diagnostics_v2','flow_index':{'project':str(root/'temporary-clone')},'login':{'password':'TOP_SECRET_PWD'}}
             cfg['_pipeline_source_fingerprint']=app.pipeline_source_signature(source)
             cached=app.cache_pipeline_build(cfg,artifact,'devicecheck-login-'+('b'*32)+'.json')
             artifact.unlink();self.assertEqual(Path(cached).read_bytes(),b'compiled-test-binary')

@@ -1,3 +1,4 @@
+import excel_execution_policy as excel_policy
 """Execute explicit case steps with assertions; never infer pass from coverage."""
 import json
 import re
@@ -16,7 +17,7 @@ ALIASES={
     '关于':['About','关于'],'更多':['More','更多'],'隐私政策':['Privacy Policy','隐私政策'],
     '通用设置':['General Settings','通用设置'],'语言':['Language','语言'],
 }
-ALLOWED={'tap','input','clear','input_local','input_secret','save','dispatch','assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','back','wait','screenshot','workflow_case'} | hybrid_webview.WEB_ACTIONS
+ALLOWED={'scroll','tap','input','clear','input_local','input_secret','save','dispatch','assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','back','wait','screenshot','workflow_case','record'} | hybrid_webview.WEB_ACTIONS
 
 def compile_linear(steps_text,expected_text):
     """Strict small grammar for human-written click/back/check use cases."""
@@ -44,14 +45,16 @@ def compile_linear(steps_text,expected_text):
 def validate_plan(plan, require_assertion=True):
     if not isinstance(plan,dict):raise ValueError('执行计划必须为 JSON 对象')
     start_state=plan.get('start_state','home')
+    observing=plan.get('execution_policy')==excel_policy.POLICY
     if start_state not in ('home','login_config','login'):raise ValueError('未知用例起点')
     steps=plan.get('steps',[]);requires=plan.get('requires',[])
     if not isinstance(steps,list) or not 1<=len(steps)<=80 or not isinstance(requires,list) or len(requires)>20:raise ValueError('需有 1～80 个步骤，最多 20 个前置断言')
+    if any(isinstance(s,dict) and s.get('action') in ('record','web_observe') for s in steps) and not observing:raise ValueError('观察记录步骤仅允许Excel观察模式')
     for step in requires+steps:
         if isinstance(step,dict) and step.get('action')=='assert_enabled' and type(step.get('enabled')) is not bool:raise ValueError('enabled断言需要布尔值')
         if isinstance(step,dict) and step.get('action')=='assert_count' and (type(step.get('count')) is not int or not 0<=step['count']<=1000):raise ValueError('count断言需要0～1000整数')
         if not isinstance(step,dict) or step.get('action') not in ALLOWED:raise ValueError('未知用例操作')
-        if step['action'] in ('tap','input','clear','input_local','input_secret','save','dispatch','assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','web_tap','web_assert','web_input','web_assert_input','web_save','workflow_case'):
+        if step['action'] in ('tap','input','clear','input_local','input_secret','save','dispatch','assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','web_tap','web_assert','web_input','web_assert_input','web_save','workflow_case','record','web_observe'):
             if not isinstance(step.get('value'),str) or not 0<len(step['value'])<=512:raise ValueError('操作需指定 value')
         if step['action'] in ('input','assert_input','web_input','web_assert_input') and (not isinstance(step.get('text'),str) or len(step['text'])>1024):raise ValueError('输入内容无效')
         if step['action'] in ('input_local','input_secret'):
@@ -62,11 +65,14 @@ def validate_plan(plan, require_assertion=True):
         if step['action']=='workflow_case' and step.get('value') not in ('configure','login','language_page','language_switch','language_all','language_all_full','language_all_restore','language_all_full_restore','language_persistence','language_persistence_zh','language_restore_logout','logout','logout_relogin'):raise ValueError('未知专用回归阶段')
         if step.get('action') in ('input','assert_input','web_input','web_assert_input') and re.search(r'\$\{(?:test_account|test_password|account|password)\}',step.get('text','')):raise ValueError('登录凭据占位符不能作为实际输入，请使用专用登录流程')
         if step.get('action') in ('input','assert_input','web_input','web_assert_input') and re.search(r'\$\{[^}]+\}',step.get('text','')):raise ValueError('测试数据占位符尚未绑定，不能把变量名称直接填入表单')
+        if step['action']=='scroll' and (type(step.get('times',1)) is not int or not 1<=step.get('times',1)<=5):raise ValueError('scroll times must be 1..5')
         if step['action']=='wait' and not 0<=float(step.get('seconds',1))<=10:raise ValueError('单次等待不能超过 10 秒')
-        allowed_by=('text','css','xpath') if step['action'] in hybrid_webview.WEB_ACTIONS else ('label','id','xpath','field')
+        allowed_by=('text','css','xpath') if step['action'] in hybrid_webview.WEB_ACTIONS else ('label','id','xpath','field','target')
         default_by='text' if step['action'] in hybrid_webview.WEB_ACTIONS else 'label'
+        if step.get('by')=='target' and step['action'] not in ('tap','input','assert','assert_selected','assert_input','clear','input_local','input_secret'):raise ValueError('逻辑目标当前仅支持原生点击、输入和正向断言')
         if step.get('by')=='field' and (start_state=='home' or step.get('value') not in ('search','account','password') or step['action'] not in ('input','clear','input_local','input_secret','assert_input')):raise ValueError('运行时输入框角色仅限登录测试的search/account/password')
         if step.get('by',default_by) not in allowed_by:raise ValueError('控件定位方式不受支持')
+        if step['action']=='web_save' and step.get('click_mode','webdriver') not in ('webdriver','dom_checked'):raise ValueError('未知 H5 保存点击方式')
         if step['action'] in ('save','web_save','dispatch'):
             api=step.get('api',{})
             if not isinstance(api,dict) or api.get('method') not in ('POST','PUT','PATCH') or not re.fullmatch(r'/[\w/.-]+',api.get('path','')):raise ValueError('保存步骤必须绑定具体写接口及 method')
@@ -77,8 +83,10 @@ def validate_plan(plan, require_assertion=True):
             http_probe.safe_fields(list(api.get('equals',{})))
             if not 1<=float(api.get('timeout',20))<=60:raise ValueError('保存接口等待时间需为 1～60 秒')
     if any(s['action'] not in ('assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','web_assert','web_assert_input') for s in requires):raise ValueError('前置检查只能使用断言')
-    if require_assertion and not any(s['action'] in ('assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','save','dispatch','web_assert','web_assert_input','web_save','workflow_case') for s in steps):raise ValueError('缺少预期结果断言，不能判定 pass')
-    return {'requires':requires,'steps':steps,**({'start_state':start_state} if start_state!='home' else {})}
+    if require_assertion and not any(s['action'] in ('assert','assert_absent','assert_enabled','assert_count','assert_selected','assert_route','assert_input','save','dispatch','web_assert','web_assert_input','web_save','workflow_case') or observing and s['action'] in ('record','web_observe') for s in steps):raise ValueError('缺少预期结果断言，不能判定 pass')
+    policy=plan.get('execution_policy')
+    if policy is not None and policy!=excel_policy.POLICY:raise ValueError('未知Excel执行规则')
+    return {'requires':requires,'steps':steps,**({'execution_policy':policy} if policy else {}),**({'start_state':start_state} if start_state!='home' else {})}
 
 def compile_case(case,override=None,index=None):
     if not case['mobile']:return None,case['scope_reason']
@@ -154,20 +162,28 @@ def api_note(event):
     if event.get('error'):parts.append('网络错误 '+str(event['error']))
     return '（'+('，'.join(parts)+'）')
 
-def find_node(nodes,step,aliases=None):
+def find_node(nodes,step,aliases=None,adapter=None,first_match=False):
     value=step['value'];by=step.get('by','label')
     def choose(matches):
-        if len(matches)>1 and step['action'] in ('tap','input','clear','input_local','input_secret','save','dispatch','assert_input'):raise CaseBlocked('操作控件未唯一匹配：'+value+'（'+str(len(matches))+' 个），未选择第一个控件猜测执行')
+        if not first_match and len(matches)>1 and step['action'] in ('tap','input','clear','input_local','input_secret','save','dispatch','assert_input'):raise CaseBlocked('操作控件未唯一匹配：'+value+'（'+str(len(matches))+' 个），未选择第一个控件猜测执行')
         return matches[0] if matches else None
+    if by=='target':
+        import app_adapter
+        return app_adapter.resolve(nodes,value,adapter,first_match=first_match)
     if by=='field':
         fields=[n for n in nodes if n['editable']]
         if value=='password':fields=[n for n in fields if n['secure']]
         else:fields=[n for n in fields if not n['secure']]
-        if len(fields)!=1:
+        if not fields or len(fields)!=1 and not first_match:
             detail='：'+'、'.join(((n.get('hint','') or n['label'] or n['kind']).strip()[:20] or '未命名输入框') for n in fields[:3]) if fields else ''
             raise CaseBlocked('登录测试输入框角色未唯一确认：'+value+'（非密码输入框 '+str(len(fields))+' 个'+detail+'）')
         return fields[0]
-    if by=='id':return choose([n for n in nodes if n['id']==value])
+    if by=='id':
+        exact=[n for n in nodes if n['id']==value]
+        if exact:return choose(exact)
+        # Flutter shared controls carry a component scope. Only our reserved
+        # identity namespace permits suffix resolution, still requiring uniqueness.
+        return choose([n for n in nodes if value.startswith('flutter.') and n['id'].endswith('/'+value)])
     if by=='xpath':return next((n for n in nodes if n['path']==value),None)
     labels=list(dict.fromkeys(ALIASES.get(value,[value])+(aliases or {}).get(value,[])))
     def node_texts(n):
@@ -201,6 +217,16 @@ def find_node(nodes,step,aliases=None):
     return choose(matches)
 
 def run(explorer,book,options,log,capture,progress,stopped,sleep):
+    sentinel=object();previous=getattr(explorer,'excel_observation_mode',sentinel)
+    try:return _run(explorer,book,options,log,capture,progress,stopped,sleep)
+    finally:
+        if explorer is not None:
+            if previous is sentinel:explorer.__dict__.pop('excel_observation_mode',None)
+            else:explorer.excel_observation_mode=previous
+
+
+def _run(explorer,book,options,log,capture,progress,stopped,sleep):
+    if options.get('evidence_policy','screenshots') not in ('screenshots','assertions'):raise ValueError('未知用例证据策略')
     plans=preview(book,options,getattr(explorer,'flow_index',None));results=[]
     seconds=int(options.get('seconds',0))
     if seconds<0:raise ValueError('用例总时长不能为负数；0 表示不限')
@@ -270,7 +296,12 @@ def run(explorer,book,options,log,capture,progress,stopped,sleep):
             else:explorer.back(nodes)
         raise CaseBlocked('未能恢复首页，未执行当前用例')
     for case in plans['cases']:
+        observing=(case.get('plan') or {}).get('execution_policy')==excel_policy.POLICY
+        if explorer is not None:explorer.excel_observation_mode=observing
         result={'id':case['id'],'sheet':case['sheet'],'row':case['row'],'title':case['title'],'result':'fail','status':'未执行','reason':'','screenshots':[],'steps':[]}
+        if observing:result.update(observation_mode=True,account_source='当前配置或已登录账号',original_expected=case['expected'])
+        result['verification_level']='ui_and_api' if case.get('plan') and any(s['action'] in ('save','dispatch','web_save') for s in case['plan']['steps']) else 'ui'
+        result['evidence_policy']=options.get('evidence_policy','screenshots')
         if stopped():result.update(status='已停止',reason='用户停止，未完成用例')
         elif time.monotonic()>=budget_deadline:result.update(status='未执行',reason='达到用例批次时间上限')
         elif not case['ready']:result.update(result='skip',status='已跳过',reason=case['reason'])
@@ -280,6 +311,10 @@ def run(explorer,book,options,log,capture,progress,stopped,sleep):
             if getattr(explorer,'http_probe',None):explorer.http_probe.last_event=None
             try:
                 auth['active']=case['plan'].get('start_state','home')!='home'
+                plan_steps=case['plan']['requires']+case['plan']['steps']
+                if not observing and any(s['action']=='assert_route' for s in plan_steps) and not getattr(explorer,'route_reader',None):raise CaseBlocked('当前运行没有源码路由观察器；此用例需要路由断言，未开始操作')
+                if any(s['action'] in ('save','dispatch') for s in plan_steps) and not getattr(explorer,'http_probe',None):raise CaseBlocked('当前运行没有原生接口观察器；此用例要求接口结果，未开始操作')
+                if any(s.get('by')=='target' for s in plan_steps) and not getattr(explorer,'adapter',None):raise CaseBlocked('此用例使用逻辑目标，请先选择定位适配包')
                 prepare=getattr(explorer,'prepare_test_case',None)
                 if prepare:prepare(case['plan'].get('start_state','home'))
                 elif auth['active']:raise CaseBlocked('登录测试起点准备器未配置，请从源码构建 Android 测试副本')
@@ -293,85 +328,127 @@ def run(explorer,book,options,log,capture,progress,stopped,sleep):
                 for number,step in enumerate(case['plan']['requires']+case['plan']['steps'],1):
                     if stopped():raise CaseBlocked('用户停止')
                     if time.monotonic()>=budget_deadline:raise CaseBlocked('达到用例批次时间上限')
-                    action=step['action'];source,nodes=stable_source()
-                    if action in ('input_local','input_secret') and not auth['active']:raise CaseBlocked('登录测试输入不能用于普通业务页面')
-                    if action in hybrid_webview.WEB_ACTIONS:
-                        if auth['active']:raise CaseBlocked('登录测试不导出 WebView 内容，协议页需使用单独无凭据用例验证')
-                        with hybrid_webview.WebView(explorer) as web:evidence=web.perform(step)
+                    try:
+                        action=step['action'];source,nodes=stable_source()
+                        if observing and action=='record':
+                            messages=[automation.redact(n['label'],explorer.secrets)[:160] for n in nodes if n.get('label') and not n.get('secure') and not n.get('editable') and re.search(r'未找到|暂无|没有|不能为空|错误|失败|成功|不正确|无效|invalid|no results|empty',n['label'],re.I)]
+                            result['steps'].append({'number':number,'action':'record','status':'observed','note':automation.redact(step.get('value',''),explorer.secrets),'messages':list(dict.fromkeys(messages))[:12]})
+                            log('观察记录：'+automation.redact(step.get('value',''),explorer.secrets))
+                            continue
+                        if observing and action=='back':
+                            reader=getattr(explorer,'route_reader',None)
+                            if reader and reader.read() in ('/loginConfig','/splash'):
+                                result['steps'].append({'number':number,'action':'back','status':'observed','executed':False,'reason':'当前为启动或登录配置根页，跳过返回以免退出App'})
+                                continue
+                        if action in ('input_local','input_secret') and not auth['active']:raise CaseBlocked('登录测试输入不能用于普通业务页面')
+                        if action in hybrid_webview.WEB_ACTIONS:
+                            if auth['active']:raise CaseBlocked('登录测试不导出 WebView 内容，协议页需使用单独无凭据用例验证')
+                            try:
+                                with hybrid_webview.WebView(explorer) as web:evidence=web.perform(step)
+                            except hybrid_webview.DOMTargetMissing:
+                                if observing:result['steps'].append({'number':number,'action':action,'status':'observed','target':step['value'],'present':False})
+                                raise
+                            source,nodes=stable_source()
+                            proof=capture('case-'+str(case['row'])+'-'+str(len(results))+'-step-'+str(number),source)
+                            if not proof and options.get('evidence_policy','screenshots')=='screenshots':raise CaseBlocked('H5 步骤截图未保存')
+                            if proof:result['screenshots'].append(proof)
+                            result['steps'].append({'number':number,'action':action,'status':'observed' if observing and action in ('web_assert','web_assert_input','web_observe') else 'pass','web':evidence})
+                            continue
+                        if observing and action in ('assert','assert_absent','assert_selected','assert_count','assert_enabled','assert_input','assert_route'):
+                            observed_nodes=automation.parse_ui(source,include_disabled=action in ('assert_count','assert_enabled'))
+                            found=[n for n in observed_nodes if find_node([n],step,getattr(explorer,'control_aliases',{}))] if action!='assert_route' else []
+                            record={'number':number,'action':action,'status':'observed','target':step.get('value'),'present':bool(found),'match_count':len(found)}
+                            if found:record['actual_text']='[redacted]' if found[0].get('secure') else automation.redact(found[0].get('label',''),explorer.secrets);record['selected']=found[0].get('selected',False);record['enabled']=found[0].get('enabled',False)
+                            if action=='assert_input' and found:
+                                record['actual_input']='[redacted]' if found[0].get('secure') else automation.redact(found[0].get('value') or found[0].get('label',''),explorer.secrets)
+                                record['input_matches']=not found[0].get('secure') and step.get('text') in (found[0].get('value'),found[0].get('label'))
+                            if action=='assert_route':
+                                reader=getattr(explorer,'route_reader',None);record['actual_route']=reader.read() if reader else None
+                            result['steps'].append(record)
+                            log('观察记录：'+str(step.get('value'))+' '+('存在' if found else '不存在')+'，匹配 '+str(len(found))+' 个')
+                            continue
+                        if action in ('assert_enabled','assert_count'):nodes=automation.parse_ui(source,include_disabled=True)
+                        if action=='assert_count':
+                            found=[n for n in nodes if find_node([n],step,getattr(explorer,'control_aliases',{}))]
+                            found=[n for n in found if not any(m['path'].startswith(n['path']+'/') for m in found if m is not n)]
+                            if len(found)!=step['count']:raise AssertionError('控件数量不符：'+step['value']+'，实际 '+str(len(found))+'，预期 '+str(step['count']))
+                        node=find_node(nodes,step,getattr(explorer,'control_aliases',{}),getattr(explorer,'adapter',None),first_match=observing) if 'value' in step else None
+                        if action=='assert_enabled':
+                            found=[n for n in nodes if find_node([n],step,getattr(explorer,'control_aliases',{}))]
+                            if len(found)!=1:raise CaseBlocked('启用状态控件未唯一匹配：'+step['value'])
+                            if found[0]['enabled']!=step['enabled']:raise AssertionError('控件启用状态不符：'+step['value'])
+                        if action in ('assert','assert_selected') and node is None:raise AssertionError('未找到预期控件/状态：'+step['value'])
+                        if action=='assert_absent' and node is not None:raise AssertionError('出现了预期不存在的控件：'+step['value'])
+                        if action=='assert_route':
+                            reader=getattr(explorer,'route_reader',None)
+                            if not reader:raise CaseBlocked('缺少路由观察器，不能确认进入预期页面')
+                            if reader.read()!=step['value']:raise AssertionError('未进入预期路由：'+step['value'])
+                        if action=='assert_input':
+                            if not node or node['secure']:raise CaseBlocked('未定位到可验证的普通输入框')
+                            if step['text'] not in (node['label'],node.get('value','')):raise AssertionError('输入框实际内容与测试值不一致')
+                        api_result=None
+                        if action in ('tap','input','clear','input_local','input_secret','save','dispatch'):
+                            if node is None:
+                                if observing:result['steps'].append({'number':number,'action':action,'status':'observed','target':step['value'],'present':False})
+                                raise CaseBlocked('未找到操作控件：'+step['value'])
+                            if node['secure'] and action not in ('clear','input_local','input_secret'):raise CaseBlocked('密码字段需使用本机登录测试输入动作')
+                            if node['secure'] and not auth['active']:raise CaseBlocked('普通业务用例不能访问密码字段')
+                            if action=='input_local' and step['text']=='password' and not node['secure']:raise CaseBlocked('本机密码仅输入系统标记的密码框')
+                            blocked=any(word and word in (node['label']+' '+node['id']).casefold() for word in automation.DEFAULT_SKIP.split(','))
+                            if action=='dispatch' and options.get('call_acceptance')!='backend_only':raise CaseBlocked('本轮未启用后台呼叫下发验收，未点击呼叫')
+                            if action=='dispatch' and re.search(r'删除|注销|支付|取消任务|强制取消|delete|logout|pay|cancel task',node['label'],re.I):raise CaseBlocked('呼叫下发流程不执行删除、支付或取消任务')
+                            consent=auth['active'] and action=='tap' and bool(re.fullmatch(r'同意(?:并继续|并登录)?|不同意|取消|登录|登录/注册|下一步|agree(?: and (?:continue|login))?|disagree|cancel|log in|login|sign in|next',node['label'].strip(),re.I))
+                            if blocked and not consent and action!='dispatch' and not (action=='save' and re.fullmatch(r'保存|提交|确认|完成|save|submit|confirm|done',node['label'].strip(),re.I)):raise CaseBlocked('该操作涉及删除或设备控制，需要专用测试流程：'+step['value'])
+                            if action in ('save','dispatch'):
+                                probe=getattr(explorer,'http_probe',None)
+                                if not probe:raise CaseBlocked('当前测试包没有接口观察器，请重新从源码构建')
+                                if step['api']['path'] not in probe.manifest['paths']:raise CaseBlocked('保存接口未在源码观察范围内，未点击保存')
+                                http_probe.safe_fields(list(step['api'].get('equals',{})))
+                                if set(step['api'].get('equals',{}))-set(probe.manifest['response_fields']):raise CaseBlocked('响应字段未加入本次构建的观察范围，未点击保存')
+                                marker=probe.mark();explorer.tap(node)
+                                until=min(budget_deadline,time.monotonic()+float(step['api'].get('timeout',20)))
+                                while time.monotonic()<until:
+                                    if stopped():raise CaseBlocked('用户停止')
+                                    api_result=probe.check(marker,step['api'])
+                                    if api_result:break
+                                    sleep(.5)
+                                if api_result is None:raise AssertionError('点击后未收到本次操作对应的接口响应')
+                                if action=='dispatch':
+                                    shape=api_result.get('request_shape')
+                                    if not isinstance(shape,dict) or not shape.get('storeId') or not shape.get('sceneCode') or not (shape.get('targetPointId') or shape.get('multiPointCount',0)>0):raise CaseBlocked('呼叫接口已返回，但缺少本次目标点位与场景参数的观察证据，不能完整验收')
+                            elif action=='tap':explorer.tap(node)
+                            else:
+                                text='' if action=='clear' else getattr(explorer,'test_credentials',{}).get(step['text'],'') if action=='input_local' else step['text']
+                                if action=='input_local' and not text:raise CaseBlocked('本机测试账号或密码未配置')
+                                if action in ('input_local','input_secret') and text:
+                                    explorer.secrets=list(dict.fromkeys(list(explorer.secrets)+[text]))
+                                eid=explorer.find({'by':'xpath','value':node['path']})
+                                if action=='clear':explorer.call('POST',explorer.base+'/element/'+eid+'/clear',{})
+                                else:explorer.type(eid,text,node)
+                        elif action=='back':
+                            if back_saves():raise CaseBlocked('源码显示返回会保存数据，需使用 save 步骤绑定接口')
+                            explorer.back(nodes)
+                        elif action=='scroll':
+                            for _ in range(step.get('times',1)):
+                                if stopped():raise CaseBlocked('Stopped')
+                                explorer.scroll()
+                        elif action=='wait':sleep(float(step.get('seconds',1)))
                         source,nodes=stable_source()
-                        proof=capture('case-'+str(case['row'])+'-'+str(len(results))+'-step-'+str(number),source)
-                        if not proof:raise CaseBlocked('H5 步骤截图未保存')
-                        result['screenshots'].append(proof)
-                        result['steps'].append({'number':number,'action':action,'status':'pass','web':evidence})
+                        name='case-'+str(case['row'])+'-'+str(len(results))+'-step-'+str(number)
+                        proof=None if auth['active'] else capture(name,source)
+                        if not proof and not auth['active'] and options.get('evidence_policy','screenshots')=='screenshots':raise CaseBlocked('当前步骤截图未能保存，不能作为完整用例通过')
+                        if proof:result['screenshots'].append(proof)
+                        result['steps'].append({'number':number,'action':action,'status':'pass',**({'api':api_result} if api_result else {}),**({'acceptance':'backend_task_accepted_only','robot_motion_verified':False} if action=='dispatch' else {})})
+                    except Exception as error:
+                        if step['action'] not in ('save','web_save') or stopped():raise
+                        import save_outcomes
+                        failure=save_outcomes.record(explorer,error)
+                        result['steps'].append({'number':number,'action':step['action'],'status':'fail','save':failure})
                         continue
-                    if action in ('assert_enabled','assert_count'):nodes=automation.parse_ui(source,include_disabled=True)
-                    if action=='assert_count':
-                        found=[n for n in nodes if find_node([n],step,getattr(explorer,'control_aliases',{}))]
-                        found=[n for n in found if not any(m['path'].startswith(n['path']+'/') for m in found if m is not n)]
-                        if len(found)!=step['count']:raise AssertionError('控件数量不符：'+step['value']+'，实际 '+str(len(found))+'，预期 '+str(step['count']))
-                    node=find_node(nodes,step,getattr(explorer,'control_aliases',{})) if 'value' in step else None
-                    if action=='assert_enabled':
-                        found=[n for n in nodes if find_node([n],step,getattr(explorer,'control_aliases',{}))]
-                        if len(found)!=1:raise CaseBlocked('启用状态控件未唯一匹配：'+step['value'])
-                        if found[0]['enabled']!=step['enabled']:raise AssertionError('控件启用状态不符：'+step['value'])
-                    if action in ('assert','assert_selected') and node is None:raise AssertionError('未找到预期控件/状态：'+step['value'])
-                    if action=='assert_absent' and node is not None:raise AssertionError('出现了预期不存在的控件：'+step['value'])
-                    if action=='assert_route':
-                        reader=getattr(explorer,'route_reader',None)
-                        if not reader:raise CaseBlocked('缺少路由观察器，不能确认进入预期页面')
-                        if reader.read()!=step['value']:raise AssertionError('未进入预期路由：'+step['value'])
-                    if action=='assert_input':
-                        if not node or node['secure']:raise CaseBlocked('未定位到可验证的普通输入框')
-                        if step['text'] not in (node['label'],node.get('value','')):raise AssertionError('输入框实际内容与测试值不一致')
-                    api_result=None
-                    if action in ('tap','input','clear','input_local','input_secret','save','dispatch'):
-                        if node is None:raise CaseBlocked('未找到操作控件：'+step['value'])
-                        if node['secure'] and action not in ('clear','input_local','input_secret'):raise CaseBlocked('密码字段需使用本机登录测试输入动作')
-                        if node['secure'] and not auth['active']:raise CaseBlocked('普通业务用例不能访问密码字段')
-                        if action=='input_local' and step['text']=='password' and not node['secure']:raise CaseBlocked('本机密码仅输入系统标记的密码框')
-                        blocked=any(word and word in (node['label']+' '+node['id']).casefold() for word in automation.DEFAULT_SKIP.split(','))
-                        if action=='dispatch' and options.get('call_acceptance')!='backend_only':raise CaseBlocked('本轮未启用后台呼叫下发验收，未点击呼叫')
-                        if action=='dispatch' and re.search(r'删除|注销|支付|取消任务|强制取消|delete|logout|pay|cancel task',node['label'],re.I):raise CaseBlocked('呼叫下发流程不执行删除、支付或取消任务')
-                        consent=auth['active'] and action=='tap' and bool(re.fullmatch(r'同意(?:并继续|并登录)?|不同意|取消|登录|登录/注册|下一步|agree(?: and (?:continue|login))?|disagree|cancel|log in|login|sign in|next',node['label'].strip(),re.I))
-                        if blocked and not consent and action!='dispatch' and not (action=='save' and re.fullmatch(r'保存|提交|确认|完成|save|submit|confirm|done',node['label'].strip(),re.I)):raise CaseBlocked('该操作涉及删除或设备控制，需要专用测试流程：'+step['value'])
-                        if action in ('save','dispatch'):
-                            probe=getattr(explorer,'http_probe',None)
-                            if not probe:raise CaseBlocked('当前测试包没有接口观察器，请重新从源码构建')
-                            if step['api']['path'] not in probe.manifest['paths']:raise CaseBlocked('保存接口未在源码观察范围内，未点击保存')
-                            http_probe.safe_fields(list(step['api'].get('equals',{})))
-                            if set(step['api'].get('equals',{}))-set(probe.manifest['response_fields']):raise CaseBlocked('响应字段未加入本次构建的观察范围，未点击保存')
-                            marker=probe.mark();explorer.tap(node)
-                            until=min(budget_deadline,time.monotonic()+float(step['api'].get('timeout',20)))
-                            while time.monotonic()<until:
-                                if stopped():raise CaseBlocked('用户停止')
-                                api_result=probe.check(marker,step['api'])
-                                if api_result:break
-                                sleep(.5)
-                            if api_result is None:raise AssertionError('点击后未收到本次操作对应的接口响应')
-                            if action=='dispatch':
-                                shape=api_result.get('request_shape')
-                                if not isinstance(shape,dict) or not shape.get('storeId') or not shape.get('sceneCode') or not (shape.get('targetPointId') or shape.get('multiPointCount',0)>0):raise CaseBlocked('呼叫接口已返回，但缺少本次目标点位与场景参数的观察证据，不能完整验收')
-                        elif action=='tap':explorer.tap(node)
-                        else:
-                            text='' if action=='clear' else getattr(explorer,'test_credentials',{}).get(step['text'],'') if action=='input_local' else step['text']
-                            if action=='input_local' and not text:raise CaseBlocked('本机测试账号或密码未配置')
-                            if action in ('input_local','input_secret') and text:
-                                explorer.secrets=list(dict.fromkeys(list(explorer.secrets)+[text]))
-                            eid=explorer.find({'by':'xpath','value':node['path']})
-                            if action=='clear':explorer.call('POST',explorer.base+'/element/'+eid+'/clear',{})
-                            else:explorer.type(eid,text,node)
-                    elif action=='back':
-                        if back_saves():raise CaseBlocked('源码显示返回会保存数据，需使用 save 步骤绑定接口')
-                        explorer.back(nodes)
-                    elif action=='wait':sleep(float(step.get('seconds',1)))
-                    source,nodes=stable_source()
-                    name='case-'+str(case['row'])+'-'+str(len(results))+'-step-'+str(number)
-                    proof=None if auth['active'] else capture(name,source)
-                    if not proof and not auth['active']:raise CaseBlocked('当前步骤截图未能保存，不能作为完整用例通过')
-                    if proof:result['screenshots'].append(proof)
-                    result['steps'].append({'number':number,'action':action,'status':'pass',**({'api':api_result} if api_result else {}),**({'acceptance':'backend_task_accepted_only','robot_motion_verified':False} if action=='dispatch' else {})})
-                if case.get('partial_reason'):result.update(result='fail',status='执行受阻',reason='已执行连续匹配的部分步骤，完整用例未完成：'+case['partial_reason'])
+                if observing:result.update(result='review',status='已记录观察结果',reason='按当前账号记录实际页面及搜索结果，未判定原始预期通过')
+                elif case.get('partial_reason'):result.update(result='fail',status='执行受阻',reason='已执行连续匹配的部分步骤，完整用例未完成：'+case['partial_reason'])
                 else:result.update(result='pass',status='已执行',reason='步骤与显式预期断言全部通过')
+                if any(item.get('status')=='fail' or item.get('web',{}).get('status')=='failed_or_unconfirmed' for item in result['steps']):result.update(result='fail',status='保存失败，后续已继续',reason='保存失败或结果未确认，已记录并执行后续步骤')
             except AssertionError as error:
                 is_precondition=len(result['steps'])<len(case['plan']['requires'])
                 reason=automation.redact(error,explorer.secrets)
@@ -385,6 +462,7 @@ def run(explorer,book,options,log,capture,progress,stopped,sleep):
                 probe=getattr(explorer,'http_probe',None);event=getattr(probe,'last_event',None) if probe else None
                 if event:reason+=api_note(event)
                 result.update(status='已停止' if stopped() else '执行受阻',reason=reason[:600])
+            if observing and result['result']=='fail' and not stopped():result.update(result='review',status='已记录，继续下一用例',reason=result['reason'] or '当前条目未完成，已保留实际结果')
             probe=getattr(explorer,'http_probe',None)
             if probe and getattr(probe,'last_event',None):result['last_observed_api']=probe.last_event
             if result['result']=='fail' and not stopped() and not auth['active']:

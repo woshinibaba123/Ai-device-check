@@ -68,10 +68,32 @@ class TutorialLayerTests(unittest.TestCase):
         # 2026-10-27 实测：后续引导步骤按钮为 previous step / I know，遮罩拦截隐私弹窗点击。
         xml='<hierarchy><node text="skip" clickable="true"/><node text="Warm Reminder"/><node text="Privacy Policy"/><node text="Disagree and quit" clickable="true"/><node text="agree with" clickable="true"/><node text="previous step" clickable="true"/><node text="I know" clickable="true"/><node text="Click on the message to see all your notifications"/></hierarchy>'
         target,reason=popup_handler.close_target(parse_ui(xml))
-        self.assertEqual(target['label'],'I know')
+        # 2026-11-10 实测：引导层同时出现跳过时优先点跳过，最快脱离遮挡。
+        self.assertEqual(target['label'],'skip')
         self.assertIn('新手引导',reason)
-        without_guide=xml.replace('<node text="previous step" clickable="true"/>','').replace('<node text="I know" clickable="true"/>','')
+        without_guide=xml.replace('<node text="previous step" clickable="true"/>','').replace('<node text="I know" clickable="true"/>','').replace('<node text="skip" clickable="true"/>','')
         self.assertEqual(popup_handler.close_target(parse_ui(without_guide))[0]['label'],'agree with')
+    def test_tutorial_skip_preferred_over_next(self):
+        # 2026-11-10 真机实测：门店页引导同时出现「跳过」和「下一步」，此前要求按钮唯一导致卡死。
+        xml='<hierarchy><node text="点击，可返回门店页面"/><node text="跳过" clickable="true"/><node text="下一步" clickable="true"/></hierarchy>'
+        target,reason=popup_handler.close_target(parse_ui(xml))
+        self.assertEqual(target['label'],'跳过')
+        self.assertIn('新手引导',reason)
+    def test_guide_pair_skipped_without_whitelisted_text(self):
+        # 未收录的引导文案：跳过+下一步并存即视为引导遮挡，任何页面都先跳过。
+        xml='<hierarchy><node text="这是全新的功能介绍哦"/><node text="跳过" clickable="true"/><node text="下一步" clickable="true"/></hierarchy>'
+        target,reason=popup_handler.close_target(parse_ui(xml))
+        self.assertEqual(target['label'],'跳过')
+    def test_guide_pair_not_claimed_without_skip(self):
+        # 只有下一步的业务页面（无跳过、无引导文案）不能被当作引导关闭。
+        xml='<hierarchy><node text="这是全新的功能介绍哦"/><node text="下一步" clickable="true"/></hierarchy>'
+        self.assertIsNone(popup_handler.close_target(parse_ui(xml))[0])
+        self.assertIsNone(popup_handler.dismiss_target(parse_ui(xml))[0])
+    def test_dismiss_target_covers_permission_and_guide_not_business_cancel(self):
+        permission='<hierarchy><node text="需要相机权限才能拍摄照片"/><node text="允许" clickable="true"/><node text="拒绝" clickable="true"/></hierarchy>'
+        self.assertIsNotNone(popup_handler.dismiss_target(parse_ui(permission))[0])
+        business='<hierarchy><node text="确认删除该设备？"/><node text="取消" clickable="true"/><node text="确定" clickable="true"/></hierarchy>'
+        self.assertIsNone(popup_handler.dismiss_target(parse_ui(business))[0])
 
 class PopupRecoveryTests(unittest.TestCase):
     def test_stuck_close_returns_and_continues_other_pages(self):

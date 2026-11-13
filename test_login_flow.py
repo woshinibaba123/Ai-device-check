@@ -25,6 +25,26 @@ class Driver:
     def log(self,*args):pass
 
 class LoginFlowTests(unittest.TestCase):
+    def test_flutter_tab_suffix_confirms_existing_home(self):
+        from unittest.mock import Mock
+        e=Mock()
+        e.source.return_value='<hierarchy><node class="android.widget.ImageView" content-desc="我的&#10;Tab 4 of 4" clickable="true"/></hierarchy>'
+        self.assertIsNotNone(login_flow.ui_confirmation(e,{'by':'accessibility id','value':'我的'}))
+        e.source.return_value='<hierarchy><node class="android.widget.EditText" password="true"/><node text="我的&#10;Tab 4 of 4"/></hierarchy>'
+        self.assertIsNone(login_flow.ui_confirmation(e,{'by':'accessibility id','value':'我的'}))
+
+    def test_semantics_button_and_text_child_are_one_mode_switch(self):
+        source='<hierarchy><node class="android.widget.Button" clickable="true"><node class="android.view.View" resource-id="flutter.shared.text"><node class="android.widget.TextView" text="账号密码登录"/></node></node></hierarchy>'
+        nodes=parse_ui(source)
+        raw=[n for n in nodes if login_flow.normalized(n['label']) in login_flow.PASSWORD]
+        self.assertEqual(len(raw),2)
+        matches=login_flow.matching(nodes,login_flow.PASSWORD)
+        self.assertEqual(len(matches),1);self.assertTrue(matches[0]['clickable'])
+
+    def test_separate_mode_buttons_remain_ambiguous(self):
+        source='<hierarchy><node class="android.widget.Button" clickable="true" text="账号密码登录"/><node class="android.widget.Button" clickable="true" text="账号密码登录"/></hierarchy>'
+        self.assertEqual(len(login_flow.matching(parse_ui(source),login_flow.PASSWORD)),2)
+
     def test_success_probe_precedes_unavailable_post_submit_ui(self):
         from test_automation import FakeDriver
         from unittest.mock import Mock
@@ -241,3 +261,67 @@ class LoginFailureEvidenceTests(unittest.TestCase):
         probe=login_probe.Probe('Android','emulator-1','com.example','devicecheck-login-'+'a'*32+'.json',command,'adb')
         with self.assertRaisesRegex(LoginBlocked,'610123'):
             probe.read()
+
+class CachedProbeIntegrityTests(unittest.TestCase):
+    def test_old_apk_cannot_be_reused_with_new_marker(self):
+        import tempfile,zipfile,login_probe
+        from pathlib import Path
+        marker='devicecheck-login-'+'a'*32+'.json'
+        with tempfile.TemporaryDirectory() as folder:
+            apk=Path(folder)/'app-debug.apk'
+            with zipfile.ZipFile(apk,'w') as archive:archive.writestr('assets/flutter_assets/kernel_blob.bin',b'old app without observer')
+            with self.assertRaisesRegex(ValueError,'与登录观察器不一致'):login_probe.verify_apk_probe(apk,marker)
+            with zipfile.ZipFile(apk,'w') as archive:archive.writestr('assets/flutter_assets/kernel_blob.bin',b'kernel '+marker.encode())
+            self.assertTrue(login_probe.verify_apk_probe(apk,marker))
+
+class OnboardingVerificationTests(unittest.TestCase):
+    def test_two_home_layers_are_removed_before_success(self):
+        from unittest.mock import Mock,patch
+        import login_flow
+        e=Mock();e.stopped.return_value=False
+        e.source.side_effect=[
+            '<hierarchy><node text="skip" clickable="true"/><node text="Click here to view the information"/><node text="Next" clickable="true"/></hierarchy>',
+            '<hierarchy><node text="skip" clickable="true"/></hierarchy>',
+            '<hierarchy><node text="Home"/></hierarchy>',
+            '<hierarchy><node text="Home"/></hierarchy>']
+        with patch('login_flow.time.sleep'):login_flow.dismiss_onboarding(e)
+        self.assertEqual([c.args[0]['label'] for c in e.tap.call_args_list],['skip','skip'])
+
+    def test_stuck_guide_cannot_be_reported_cleared(self):
+        from unittest.mock import Mock,patch
+        import login_flow,itertools
+        from automation import LoginBlocked
+        e=Mock();e.stopped.return_value=False
+        e.source.return_value='<hierarchy><node text="Click here to view the information"/><node text="Next" clickable="true"/></hierarchy>'
+        ticks=itertools.count()
+        with patch('login_flow.time.sleep'),patch('login_flow.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(LoginBlocked,'引导弹层仍未关闭'):login_flow.dismiss_onboarding(e)
+        self.assertFalse(any('已清理完毕' in str(c) for c in e.log.call_args_list))
+
+class SemanticLoginRegressionTests(unittest.TestCase):
+    def test_generated_xpath_keeps_input_node_for_native_replacement(self):
+        from unittest.mock import Mock
+        exp=Mock();exp.base='/session/s';exp.stopped.return_value=False
+        exp.source.return_value='<hierarchy><node class="android.widget.EditText" hint="Enter account" bounds="[10,20][200,60]"/></hierarchy>'
+        exp.find.return_value='account';exp.call.return_value='test-account'
+        with patch('login_flow.time.sleep'):
+            login_flow.fill_account(exp,'test-account',{'by':'xpath','value':'/hierarchy[1]/node[1]'})
+        node=exp.type.call_args.args[2]
+        self.assertTrue(node['editable']);self.assertEqual(node['bounds'],'[10,20][200,60]')
+
+    def test_mode_switch_resolves_after_keyboard_dismissal_and_clicks_element(self):
+        from unittest.mock import Mock
+        exp=Mock();exp.platform='Android';exp.base='/session/s';exp.stopped.return_value=False
+        exp._account_focus_settled=True
+        verify='<hierarchy><node class="android.widget.EditText"/><node class="android.widget.EditText"/><node class="android.widget.Button" clickable="true" text="login by pwd" bounds="[10,100][200,150]"/></hierarchy>'
+        password='<hierarchy><node class="android.widget.EditText" password="true"/></hierarchy>'
+        state={'clicked':False};exp.source.side_effect=lambda:password if state['clicked'] else verify
+        exp.find.return_value='fresh-switch'
+        def call(method,path,data):
+            if path.endswith('/fresh-switch/click'):state['clicked']=True
+        exp.call.side_effect=call
+        now=[0.0]
+        with patch('login_flow.time.monotonic',side_effect=lambda:now[0]),patch('login_flow.time.sleep',side_effect=lambda seconds:now.__setitem__(0,now[0]+seconds)):
+            login_flow.ensure_password(exp)
+        self.assertTrue(state['clicked']);exp.tap.assert_not_called()
+        exp.find.assert_called_with({'by':'xpath','value':'/hierarchy[1]/node[3]'})

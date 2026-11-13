@@ -1,4 +1,4 @@
-import tempfile, unittest
+import tempfile, unittest, json
 from pathlib import Path
 from unittest.mock import patch
 import h5_source
@@ -6,6 +6,16 @@ import codebuddy_bridge
 from test_codebuddy_bridge import business_sample, bindings_sample
 
 class H5SourceTests(unittest.TestCase):
+    def test_imported_api_survives_small_excerpt_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'package.json').write_text('{}');(root/'src/api').mkdir(parents=True)
+            (root/'src/repair.vue').write_text("import {save} from '@/api/repair';\n<button>报修提交</button>\n"+'\n'.join('<label>报修字段</label>' for _ in range(18)))
+            (root/'src/api/repair.js').write_text("export function save() { return request.post('/api/repair/save'); }")
+            for n in range(15):(root/f'src/noise{n}.vue').write_text('\n'.join('<label>报修字段</label>' for _ in range(18)))
+            result=h5_source.summary(tmp,'报修提交',max_chars=1700)
+            self.assertEqual(result['files'][0]['file'],'src/repair.vue')
+            self.assertIn('/api/repair/save',json.dumps(result))
+
     def test_collects_page_evidence_without_env_dependencies_or_linked_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);(root/'package.json').write_text('{}');(root/'src').mkdir()

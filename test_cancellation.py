@@ -9,6 +9,19 @@ import app
 from cancellation import Control, Cancelled
 
 class CancellationTests(unittest.TestCase):
+    def test_large_input_survives_delayed_child_read(self):
+        payload='x'*1_000_000
+        result=Control().run([sys.executable,'-c','import sys,time;time.sleep(.5);print(len(sys.stdin.read()))'],input=payload,capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.stdout.strip(),str(len(payload)))
+
+    def test_stdout_is_observed_before_process_finishes(self):
+        observations=[];start=time.monotonic()
+        result=Control().run([sys.executable,'-u','-c','import time;print("first",flush=True);time.sleep(.4);print("last",flush=True)'],capture_output=True,text=True,
+                             on_stdout=lambda text:observations.append((time.monotonic()-start,text)))
+        self.assertEqual(result.stdout,'first\nlast\n')
+        self.assertEqual(observations[0][1],'first\n')
+        self.assertLess(observations[0][0],.35)
+        self.assertEqual(observations[-1][1],result.stdout)
     def test_child_process_is_interrupted(self):
         stop = threading.Event()
         timer = threading.Timer(.2, stop.set); timer.start()

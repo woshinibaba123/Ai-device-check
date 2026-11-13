@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 import automation
 import hybrid_webview
+import popup_handler
 
 # Baseline adapter vocabulary; source translation keys extend every group.
 GROUPS = [
@@ -111,7 +112,7 @@ def compile_text(text):
         if len(parts)==2:
             nested=compile_text('\n'.join(parts))
             result.extend(nested);continue
-        m=re.fullmatch(r'(?:点击|打开)(?:底部)?[“"「]?(.+?)[”"」]?',line)
+        m=re.fullmatch(r'(?:点击|打开|进入)(?:底部)?[“"「]?(.+?)[”"」]?',line)
         if m:
             target=unquote(m[1]).removesuffix('按钮')
             if target in ('提交','保存'):add('submit',line,target=target)
@@ -207,7 +208,71 @@ return [...result];
 '''
 
 
+# Page identity is checked using the source route and a rendered page marker.
+H5_PAGES={
+ '附近门店':('/storeMap','.store-map .map-page'),
+ '附近门店地图':('/storeMap','.store-map .map-page','.store-list-page'),
+ '附近门店列表':('/storeMap','.store-list-page'),
+ '附近门店详情':('/storeDetail','.store-detail'),
+ '学习中心':('/study','.study'),
+ '报修表单':('/repairForm','#repair .repair-form'),
+ '报修记录':('/repairList','.repair-list'),
+}
+H5_PAGE_ALTERNATIVES={
+ '学习中心':[
+  ('@path:/sub-app/study/courseCenter/list','input:not([type=hidden])'),
+  ('@path:/webos/sub-app/study/courseCenter/list','input:not([type=hidden])'),
+ ],
+}
+H5_BACK=r'''
+const route=location.hash.slice(1).split('?')[0];
+const visible=e=>!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).display!=='none';
+const selectors=route==='/storeMap'?['.store-list-page .right-back','.store-map .city-area .van-icon-arrow-left']:
+ route==='/study'?['.study .van-nav-bar__left']:
+ route==='/repairList'?['.repair-list .van-nav-bar__left']:[];
+for(const selector of selectors){const found=[...document.querySelectorAll(selector)].filter(visible);if(found.length===1)return selector;}
+if(['/sub-app/study/courseCenter/list','/webos/sub-app/study/courseCenter/list'].includes(location.pathname.replace(/\/$/,''))){
+ const icons=[...document.querySelectorAll('body *')].filter(e=>{
+  if(e.namespaceURI!=='http://www.w3.org/1999/xhtml'||e.closest('input,.el-input,.el-input__prefix,.van-search'))return false;
+  const r=e.getBoundingClientRect();
+  if(!visible(e)||r.left<0||r.left+r.width/2>=45||r.top<0||r.top+r.height/2>=45||r.width<=0||r.width>=70||r.height<=0||r.height>=70)return false;
+  const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+  return !!hit&&(hit===e||e.contains(hit));
+ });
+ const unique=icons.filter(e=>!icons.some(c=>c!==e&&e.contains(c)));
+ if(unique.length===1){
+  let e=unique[0];const parts=[];
+  while(e&&e.nodeType===1){let i=1;for(let p=e.previousElementSibling;p;p=p.previousElementSibling)if(p.tagName===e.tagName)i++;parts.unshift(e.tagName.toLowerCase()+'['+i+']');e=e.parentElement;}
+  return {by:'xpath',value:'/'+parts.join('/')};
+ }
+ const header=[...document.querySelectorAll('body *')].filter(e=>{
+  if(!visible(e))return false;const r=e.getBoundingClientRect();return r.left>=0&&r.left<80&&r.top>=0&&r.top<70&&r.width>0&&r.width<100&&r.height>0&&r.height<100;
+ }).slice(0,25).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName.toLowerCase(),class:(e.getAttribute('class')||'').slice(0,120),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}});
+ return {unresolved:true,header};
+}
+return null;
+'''
+PAGE_READY=r'''
+const [route,selector,excluded]=arguments;
+if(document.readyState!=='complete')return false;
+const byPath=route.startsWith('@path:');
+const path=byPath?location.pathname.replace(/\/$/,''):location.hash.slice(1).split('?')[0];
+const expected=byPath?route.slice(6):route;
+const visible=e=>!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).display!=='none';
+const busy=[...document.querySelectorAll('.el-loading-mask,.van-loading__mask,[aria-busy="true"]')].some(e=>{
+ if(!visible(e)||typeof e.getBoundingClientRect!=='function')return false;
+ const r=e.getBoundingClientRect();return r.width>=innerWidth*.7&&r.height>=innerHeight*.5;
+});
+return path===expected&&!busy&&[...document.querySelectorAll(selector)].some(visible)&&(!excluded||![...document.querySelectorAll(excluded)].some(visible));
+'''
+
+
+# Field aliases refer to form labels, rather than navigation labels with the same name.
+FIELD_TARGETS={'门店':'门店名称','机器人':'机器人编号','故障类型':'问题类型','故障描述':'问题描述'}
+
+
 def _web_find(web,target,groups,mode='text',first=False):
+    target=FIELD_TARGETS.get(target,target) if mode=='field' else target
     words=[] if first else terms(target,groups)
     if not first:
         translated=web.js(RUNTIME_TRANSLATIONS,[words,target],read_only=True)
@@ -223,7 +288,9 @@ def _web_find(web,target,groups,mode='text',first=False):
 def _native(e,target,groups,tab=False):
     words=set(terms(target,groups));nodes=automation.parse_ui(e.source())
     package=getattr(e,'app_package','')
-    matches=[n for n in nodes if (not package or n['package']==package) and (norm(n['label'].split('\n')[0]) in words or n['editable'] and norm(n.get('hint','')) in words) and (not tab or re.search(r'\nTab \d+ of \d+',n['label']))]
+    web_roots=[n['path'] for n in nodes if 'WebView' in n['kind']]
+    native_nodes=[n for n in nodes if not any(n['path']==root or n['path'].startswith(root+'/') for root in web_roots)]
+    matches=[n for n in native_nodes if (not package or n['package']==package) and (norm(n['label'].split('\n')[0]) in words or n['editable'] and norm(n.get('hint','')) in words) and (not tab or re.search(r'\nTab \d+ of \d+',n['label']))]
     clickable=[n for n in matches if n['clickable']]
     matches=clickable or matches
     if len(matches)>1:raise ValueError('“%s”匹配多个原生控件，请补充具体名称；未点击'%target)
@@ -277,6 +344,18 @@ def perform(e,step,sleep,login=None):
     if op=='back':
         node,nodes=_native(e,'首页',groups,True)
         if node:e.tap(node)
+        elif any('WebView' in n['kind'] for n in nodes):
+            with hybrid_webview.WebView(e) as web:
+                selector=web.js(H5_BACK,read_only=True)
+                if isinstance(selector,str) and selector:
+                    web.perform({'action':'web_tap','by':'css','value':selector})
+                    return {'operation':op,'matched':True,'via':'h5_header'}
+                if isinstance(selector,dict) and selector.get('by')=='xpath' and isinstance(selector.get('value'),str):
+                    web.perform(dict(selector,action='web_tap'))
+                    return {'operation':op,'matched':True,'via':'h5_header'}
+                if isinstance(selector,dict) and selector.get('unresolved'):
+                    raise RuntimeError('学习中心返回控件未唯一定位，未点击；页头结构：'+json.dumps(selector.get('header',[]),ensure_ascii=False))
+            e.back(nodes)
         else:e.back(nodes)
         return {'operation':op}
     if op=='submission_result':
@@ -287,18 +366,24 @@ def perform(e,step,sleep,login=None):
             # Application-specific binding, checked against live form before mutation.
             found=web.js("return !!document.querySelector('#repair button.btn-submit') && location.hash.split('?')[0]==='#/repairForm'",read_only=True)
             if not found:raise RuntimeError('当前页面没有已适配的提交接口，未点击；首版支持报修表单提交')
-            result=web.perform({'action':'web_save','by':'css','value':'#repair button.btn-submit','api':{'method':'POST','path':'/api/devops/aftersale/work/order','codes':[610000],'timeout':60}})
+            result=web.perform({'action':'web_save','by':'css','value':'#repair button.btn-submit','click_mode':'dom_checked','api':{'method':'POST','path':'/api/devops/aftersale/work/order','codes':[610000],'timeout':60}})
             e.business_submission=result
             return result
     # Resolve known page assertions using unique content rather than persistent tab labels.
     page_marks={'首页':'报修','我的':'通用设置','消息':'消息设置','报修表单':'门店名称'}
     looking=page_marks.get(target,target) if op=='assert' else target
-    deadline=time.monotonic()+30
+    deadline=time.monotonic()+(90 if op=='assert' and target in H5_PAGES else 30)
     while True:
         if e.stopped():raise RuntimeError('测试已停止')
         node,nodes=_native(e,looking,groups,step.get('tab',False))
+        permission,reason=popup_handler.permission_target(nodes)
+        if permission and any(n.get('package') in popup_handler.PERMISSION_PACKAGES for n in nodes):
+            e.log(reason)
+            e.tap(permission)
+            sleep(.5)
+            continue
         is_web=any('WebView' in n['kind'] for n in nodes)
-        if op in ('click','assert') and node and not (is_web and op=='click'):
+        if op in ('click','assert') and node and not ((is_web and op=='click') or (op=='assert' and target in H5_PAGES)):
             if op=='click':
                 if not node['clickable']:raise RuntimeError('“%s”已找到，但未暴露可点击标识'%target)
                 e.tap(node)
@@ -313,6 +398,14 @@ def perform(e,step,sleep,login=None):
             return {'operation':op,'target':target,'matched':True}
         if is_web:
             with hybrid_webview.WebView(e) as web:
+                if op=='assert' and target in H5_PAGES:
+                    for spec in [H5_PAGES[target]]+H5_PAGE_ALTERNATIVES.get(target,[]):
+                        if web.js(PAGE_READY,list(spec),read_only=True) is True:
+                            return {'operation':op,'target':target,'matched':True,'route':spec[0].removeprefix('@path:')}
+                    if time.monotonic()>=deadline:
+                        raise AssertionError('H5 页面“%s”未就绪（路由或页面结构不匹配）'%target)
+                    sleep(.5)
+                    continue
                 if op=='check':
                     # Explicit agreement instruction; idempotently check only this form checkbox.
                     state=web.js("const e=document.querySelector('#repair .argument .van-checkbox');return e?{checked:e.getAttribute('aria-checked')==='true'||!!e.querySelector('.van-checkbox__icon--checked')}:null",read_only=True)

@@ -174,7 +174,7 @@ class RuntimeTranslationTests(unittest.TestCase):
 const result={};
 for(const locale of Object.keys(messages)){
  const i18n={messages,locale};
- global.document={querySelectorAll:()=>[{__vue__:{$i18n:i18n}}]};
+ global.document={readyState:'complete',querySelectorAll:()=>[{__vue__:{$i18n:i18n}}]};
  result[locale]=['门店名称','联系人','联系方式'].map(target=>discover(['Contact','연락처','联系方式','联系人'],target));
 }
 console.log(JSON.stringify(result));'''
@@ -199,8 +199,185 @@ console.log(JSON.stringify(result));'''
         e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView" /></hierarchy>'
         with patch.object(s.hybrid_webview,'WebView') as ctx:
             web=ctx.return_value.__enter__.return_value
-            web.js.side_effect=[['店名'],[{'xpath':'/label','editable':False,'label':'店名'}]]
+            web.js.return_value=True
             result=s.perform(e,s.compile_text('等待报修表单加载完成')[0],Mock())
             self.assertTrue(result['matched'])
-            self.assertEqual(web.js.call_args.args[1][1],'text')
+            self.assertEqual(web.js.call_args.args[0],s.PAGE_READY)
+            self.assertEqual(web.js.call_args.args[1],['/repairForm','#repair .repair-form'])
             web.perform.assert_not_called()
+
+class FormAliasRegressionTests(unittest.TestCase):
+    def test_field_aliases_resolve_form_key_instead_of_generic_navigation_key(self):
+        for target,canonical in s.FIELD_TARGETS.items():
+            with self.subTest(target=target):
+                web=Mock();web.js.side_effect=[['translated field'],[{'xpath':'/input','editable':True}]]
+                self.assertIsNotNone(s._web_find(web,target,s.GROUPS,'field'))
+                self.assertEqual(web.js.call_args_list[0].args[1][1],canonical)
+
+    def test_store_navigation_retains_generic_key(self):
+        web=Mock();web.js.side_effect=[['店舗'],[{'xpath':'/button'}]]
+        s._web_find(web,'门店',s.GROUPS,'text')
+        self.assertEqual(web.js.call_args_list[0].args[1][1],'门店')
+
+    def test_japanese_store_selection_after_form_loaded(self):
+        e=Mock();e.business_groups=s.GROUPS;e.app_package='test.app';e.stopped.return_value=False
+        e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView" /></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            web=ctx.return_value.__enter__.return_value
+            def js(script,args=None,**kwargs):
+                if script==s.RUNTIME_TRANSLATIONS:
+                    return ['店名'] if args[1]=='门店名称' else ['店舗'] if args[1]=='门店' else args[0]
+                words,mode=args
+                if mode=='field' and words==['店名']:return [{'xpath':'/store/input','editable':True}]
+                if mode=='option' and '乘梯测试门店---cy' in words:return [{'xpath':'/options/li','editable':False}]
+                return []
+            web.js.side_effect=js
+            result=s.perform(e,s.compile_text('门店选择“乘梯测试门店---cy”')[0],Mock())
+            self.assertTrue(result['matched'])
+            actions=[c.args[0] for c in web.perform.call_args_list]
+            self.assertEqual(actions[0]['value'],'/store/input')
+            self.assertEqual(actions[0]['text'],'乘梯测试门店---cy')
+            self.assertEqual(actions[1]['value'],'/options/li')
+            self.assertEqual(actions[2]['action'],'web_assert_input')
+
+class SourcePageAssertionTests(unittest.TestCase):
+    def test_enter_is_compiled_without_changing_target(self):
+        self.assertEqual(s.compile_text('进入附近门店')[0]['target'],'附近门店')
+
+    def test_nearby_page_uses_route_and_dom_even_when_title_matches(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS;e.stopped.return_value=False
+        e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView"/><node package="test.app" text="附近门店"/></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            web=ctx.return_value.__enter__.return_value;web.js.return_value=True
+            result=s.perform(e,s.compile_text('确认附近门店页面打开')[0],Mock())
+            self.assertEqual(result['route'],'/storeMap')
+            self.assertEqual(web.js.call_args.args[1],['/storeMap','.store-map .map-page'])
+
+    def test_matching_title_on_wrong_route_does_not_pass(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS;e.stopped.return_value=False
+        e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView"/><node package="test.app" text="附近门店"/></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx,patch.object(s.time,'monotonic',side_effect=[0,91]):
+            ctx.return_value.__enter__.return_value.js.return_value=False
+            with self.assertRaisesRegex(AssertionError,'路由或页面结构不匹配'):
+                s.perform(e,s.compile_text('确认附近门店页面打开')[0],Mock())
+
+class SourceBackTests(unittest.TestCase):
+    def test_nearby_back_clicks_source_header_instead_of_browser_history(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS
+        e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView" /></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            web=ctx.return_value.__enter__.return_value
+            web.js.return_value='.store-map .city-area .van-icon-arrow-left'
+            result=s.perform(e,s.compile_text('返回')[0],Mock())
+            self.assertEqual(result['via'],'h5_header')
+            e.back.assert_not_called()
+            web.perform.assert_called_once_with({'action':'web_tap','by':'css','value':'.store-map .city-area .van-icon-arrow-left'})
+
+class PageDOMScriptTests(unittest.TestCase):
+    def test_map_assertion_rejects_visible_list_overlay_and_wrong_routes(self):
+        import subprocess,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script='const check=new Function('+json.dumps(s.PAGE_READY)+''');
+const el={getClientRects:()=>[{}]};
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});
+let listVisible=true;
+global.document={readyState:'complete',querySelectorAll:s=>s==='.store-list-page'?(listVisible?[el]:[]):[el]};
+global.location={hash:'#/storeMap?redacted'};
+const args=['/storeMap','.store-map .map-page','.store-list-page'];
+const results=[check(...args)];listVisible=false;results.push(check(...args));
+location.hash='#/study';results.push(check(...args));
+console.log(JSON.stringify(results));'''
+        self.assertEqual(json.loads(subprocess.check_output([node,'-e',script],text=True)),[False,True,False])
+
+class BusinessPermissionTests(unittest.TestCase):
+    def test_nearby_location_permission_is_resolved_before_page_assertion(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS;e.stopped.return_value=False
+        e.source.side_effect=[
+            '<hierarchy><node package="com.google.android.permissioncontroller" text="Allow location?"/><node package="com.google.android.permissioncontroller" text="While using the app" clickable="true"/></hierarchy>',
+            '<hierarchy><node package="test.app" class="android.webkit.WebView"/></hierarchy>']
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            ctx.return_value.__enter__.return_value.js.return_value=True
+            result=s.perform(e,s.compile_text('确认附近门店页面打开')[0],Mock())
+        self.assertEqual(result['route'],'/storeMap')
+        self.assertEqual(e.tap.call_args.args[0]['label'],'While using the app')
+
+    def test_generic_app_allow_button_is_not_granted_by_business_handler(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS;e.stopped.return_value=False
+        e.source.return_value='<hierarchy><node package="test.app" text="location permission"/><node package="test.app" text="Allow" clickable="true"/><node package="test.app" class="android.webkit.WebView"/></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            ctx.return_value.__enter__.return_value.js.return_value=True
+            s.perform(e,s.compile_text('确认附近门店页面打开')[0],Mock())
+        e.tap.assert_not_called()
+
+class CourseCenterVariantTests(unittest.TestCase):
+    def test_source_defined_course_paths_require_visible_search_control(self):
+        import subprocess,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script='const ready=new Function('+json.dumps(s.PAGE_READY)+''');
+global.location={pathname:'/sub-app/study/courseCenter/list',hash:''};
+let shown=true;const input={getClientRects:()=>shown?[{}]:[]};
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});
+global.document={readyState:'complete',querySelectorAll:()=>[input]};
+const args=['@path:/sub-app/study/courseCenter/list','input:not([type=hidden])'];
+const results=[ready(...args)];shown=false;results.push(ready(...args));shown=true;
+location.pathname='/login';results.push(ready(...args));
+location.pathname='/webos/sub-app/study/courseCenter/list';results.push(ready('@path:'+location.pathname,args[1]));
+console.log(JSON.stringify(results));'''
+        self.assertEqual(json.loads(subprocess.check_output([node,'-e',script],text=True)),[True,False,False,True])
+
+    def test_course_back_requires_unique_header_icon(self):
+        import subprocess,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script='const back=new Function('+json.dumps(s.H5_BACK)+''');
+global.location={pathname:'/sub-app/study/courseCenter/list',hash:''};
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});
+const root={nodeType:1,tagName:'HTML',parentElement:null,previousElementSibling:null};
+function icon(x=10){return {nodeType:1,tagName:'I',namespaceURI:'http://www.w3.org/1999/xhtml',parentElement:root,previousElementSibling:null,getAttribute:()=>'',closest:()=>null,contains:()=>false,getClientRects:()=>[{}],getBoundingClientRect:()=>({left:x,top:10,width:20,height:20})}}
+let icons=[icon()];global.document={readyState:'complete',querySelectorAll:s=>s==='body *'?icons:[],elementFromPoint:x=>icons.find(e=>{const r=e.getBoundingClientRect();return x>=r.left&&x<=r.left+r.width})};
+const first=back();icons=[icon(10),icon(30)];const second=back();console.log(JSON.stringify([first,second]));'''
+        result=json.loads(subprocess.check_output([node,'-e',script],text=True))
+        self.assertEqual(result[0],{'by':'xpath','value':'/html[1]/i[1]'})
+        self.assertTrue(result[1]['unresolved'])
+
+class HybridNativeAmbiguityTests(unittest.TestCase):
+    def test_h5_contact_fields_use_dom_instead_of_ambiguous_native_synonyms(self):
+        e=Mock();e.app_package='test.app';e.stopped.return_value=False
+        e.business_groups=[['联系人','联系方式','連絡担当者','連絡先']]
+        e.source.return_value='<hierarchy><node package="test.app" class="android.webkit.WebView"><node package="test.app" text="連絡担当者"/><node package="test.app" text="連絡先"/></node></hierarchy>'
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            web=ctx.return_value.__enter__.return_value
+            web.js.side_effect=[['連絡担当者'],[{'xpath':'/html[1]/body[1]/input[1]','editable':True,'label':''}]]
+            result=s.perform(e,s.compile_text('联系人填写“自动化测试人员”')[0],Mock())
+            self.assertTrue(result['matched'])
+            self.assertEqual(web.perform.call_args_list[0].args[0]['text'],'自动化测试人员')
+            self.assertEqual(web.js.call_args.args[1][0],['連絡担当者'])
+        e.tap.assert_not_called()
+
+class PendingH5TransitionTests(unittest.TestCase):
+    def test_native_entry_label_does_not_satisfy_h5_page_assertion(self):
+        e=Mock();e.app_package='test.app';e.business_groups=s.GROUPS;e.stopped.return_value=False
+        e.source.side_effect=[
+            '<hierarchy><node package="test.app" text="附近门店" clickable="true"/></hierarchy>',
+            '<hierarchy><node package="test.app" class="android.webkit.WebView"/></hierarchy>']
+        with patch.object(s.hybrid_webview,'WebView') as ctx:
+            ctx.return_value.__enter__.return_value.js.return_value=True
+            result=s.perform(e,s.compile_text('确认附近门店页面打开')[0],Mock())
+        self.assertEqual(result['route'],'/storeMap');e.tap.assert_not_called()
+
+class PageLoadingMaskTests(unittest.TestCase):
+    def test_visible_search_under_full_page_loading_mask_is_not_ready(self):
+        import subprocess,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script='const ready=new Function('+json.dumps(s.PAGE_READY)+''');
+global.location={pathname:'/sub-app/study/courseCenter/list',hash:''};global.innerWidth=400;global.innerHeight=800;
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});
+const input={getClientRects:()=>[{}]};let loading=true;
+const mask={getClientRects:()=>loading?[{}]:[],getBoundingClientRect:()=>({width:400,height:800})};
+global.document={readyState:'complete',querySelectorAll:s=>s.startsWith('.el-loading-mask')?[mask]:[input]};
+const args=['@path:/sub-app/study/courseCenter/list','input'];const first=ready(...args);loading=false;
+console.log(JSON.stringify([first,ready(...args)]));'''
+        self.assertEqual(json.loads(subprocess.check_output([node,'-e',script],text=True)),[False,True])

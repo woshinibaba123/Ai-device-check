@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import host_runtime
-import json, os, re, shutil, subprocess, threading, time, uuid, urllib.request, urllib.error, urllib.parse
+import uia_health
+import json, os, re, shutil, subprocess, sys, threading, time, uuid, urllib.request, urllib.error, urllib.parse
 import cancellation
 import runtime_health
+import session_startup
 import importlib
 import popup_handler
 import source_navigation
@@ -14,6 +16,7 @@ import matrix
 import automation
 import language_tests
 import excel_ai
+import parsed_cases
 import language_pipeline
 import case_workbook
 import case_runner
@@ -23,10 +26,22 @@ import http_probe
 import codebuddy_bridge
 import hybrid_webview
 import manual_steps
+import module_scripts
+import preset_flows
+import ai_operator
+import setup_defaults
+import action_knowledge
+import page_diagnostics
+import web_diagnostics_source
+import diagnostic_privacy
 import semantic_steps
 import language_workflow
 import login_credential_store
 import runtime_inventory
+import execution_profile
+import app_adapter
+import backend_diagnostics
+import run_events
 import hashlib
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,11 +77,11 @@ def pipeline_source_signature(project):
 
 
 def cache_pipeline_build(cfg,artifact,probe_name):
-    identifier=cfg.get('pipeline_id','')
+    identifier=cfg.get('pipeline_id') or hashlib.md5((str(cfg.get('source',''))+'|'+str(cfg.get('entrypoint',''))).encode()).hexdigest()
     if cfg.get('platform')!='Android' or not re.fullmatch(r'[a-f0-9]{32}',identifier):return str(artifact)
     folder=ROOT/'.runtime/pipeline-builds'/identifier;folder.mkdir(parents=True,exist_ok=True)
     target=folder/'app-debug.apk';shutil.copyfile(artifact,target)
-    metadata={k:cfg.get(k) for k in ('source','entrypoint','source_plan','route_tracking','http_manifest','flow_index')}
+    metadata={k:cfg.get(k) for k in ('source','entrypoint','source_plan','route_tracking','http_manifest','web_manifest','diagnostic_schema','flow_index')}
     metadata['source_fingerprint']=cfg.get('_pipeline_source_fingerprint');metadata['login_probe']=probe_name
     if metadata.get('flow_index'):metadata['flow_index']=dict(metadata['flow_index'],project=cfg['source'])
     (folder/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False))
@@ -74,7 +89,8 @@ def cache_pipeline_build(cfg,artifact,probe_name):
 
 
 def apply_pipeline_build(cfg):
-    identifier=cfg.get('pipeline_id','')
+    if cfg.get('rebuild_app'):return False
+    identifier=cfg.get('pipeline_id') or hashlib.md5((str(cfg.get('source',''))+'|'+str(cfg.get('entrypoint',''))).encode()).hexdigest()
     if not re.fullmatch(r'[a-f0-9]{32}',identifier) or not cfg.get('source') or language_workflow.applies(cfg.get('case_book',{})):return False
     if cfg.get('platform')=='iOS' or any(t.get('ios_model') or t.get('platform')=='iOS' for t in cfg.get('targets',[])):return False
     folder=ROOT/'.runtime/pipeline-builds'/identifier;file=folder/'metadata.json';artifact=folder/'app-debug.apk'
@@ -82,16 +98,17 @@ def apply_pipeline_build(cfg):
     try:metadata=json.loads(file.read_text())
     except (OSError,ValueError):return False
     if not isinstance(metadata,dict):return False
+    if metadata.get('diagnostic_schema')!='diagnostics_v2':return False
     if metadata.get('source')!=cfg['source'] or metadata.get('entrypoint')!=cfg.get('entrypoint'):return False
     if metadata.get('source_fingerprint')!=pipeline_source_signature(cfg['source']):return False
     required={field for c in case_runner.selected_cases(cfg.get('case_book',{}),cfg.get('cases',{})) if c.get('plan_text') for s in json.loads(c['plan_text']).get('steps',[]) if s['action'] in ('save','dispatch') for field in s['api'].get('equals',{})}
     dispatch=any(s['action']=='dispatch' for c in case_runner.selected_cases(cfg.get('case_book',{}),cfg.get('cases',{})) if c.get('plan_text') for s in json.loads(c['plan_text']).get('steps',[]))
     if dispatch and (metadata.get('http_manifest') or {}).get('request_shape_version')!='call_task_fields_v1':return False
     if required-set((metadata.get('http_manifest') or {}).get('response_fields',[])):return False
-    cfg.update(source='',app=str(artifact),login_probe=metadata.get('login_probe'),source_plan=metadata.get('source_plan'),route_tracking=metadata.get('route_tracking'),http_manifest=metadata.get('http_manifest'),flow_index=metadata.get('flow_index'),pipeline_build_reused=True)
+    cfg.update(business_source=cfg['source'],execution_mode='source',source='',app=str(artifact),login_probe=metadata.get('login_probe'),source_plan=metadata.get('source_plan'),route_tracking=metadata.get('route_tracking'),http_manifest=metadata.get('http_manifest'),web_manifest=metadata.get('web_manifest'),flow_index=metadata.get('flow_index'),pipeline_build_reused=True)
     return True
 # 任务日志只保留主要事件；逐次点击等过程噪音在日志出口统一过滤。
-NOISE_LOG_PATTERN = re.compile(r'^(点击方式|隐私确认原生点击坐标|等待中页面|先让账号框失焦|收起键盘|当前登录页|准备输入密码框|已到达登录页|已确认测试账号填入|点击账号密码登录|点击登录按钮|勾选登录协议|关闭引导弹层)')
+NOISE_LOG_PATTERN = re.compile(r'^(点击方式|隐私确认原生点击坐标|等待中页面|先让账号框失焦|收起键盘|当前登录页|准备输入密码框|已到达登录页|点击登录按钮|勾选登录协议|关闭引导弹层)')
 
 def local_emulator_proxy():
     """Reuse the Mac's local HTTP proxy for tool-owned emulator TCP traffic."""
@@ -162,24 +179,56 @@ def raw_request(method, path, data=None, timeout=None):
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout or (300 if method == 'POST' and path == '/session' else 90)) as r: value = json.load(r).get('value')
     except urllib.error.HTTPError as e:
         raise RuntimeError(e.read().decode()[:3000]) from e
+    except TimeoutError as e:
+        endpoint=re.sub(r'/session/[^/]+','/session/[session]',path.split('?')[0])
+        endpoint=re.sub(r'/element/[^/]+','/element/[element]',endpoint)
+        raise RuntimeError('Appium 请求超时：'+method+' '+endpoint+'；未自动重试操作') from e
     if isinstance(value, dict) and value.get('error'): raise RuntimeError(value.get('message', str(value)))
     return value
 
 def request(method, path, data=None):
+    trace=getattr(CONTEXT,'backend_trace',None)
+    if trace:return trace.call(method,path,lambda:_request_impl(method,path,data))
+    return _request_impl(method,path,data)
+
+def _request_impl(method, path, data=None):
     control = getattr(CONTEXT, 'control', cancellation.Control())
+    monitor=getattr(CONTEXT,'monitor',None)
+    if monitor:monitor.before(method,path,data)
     def late_session(value):
         if method == 'POST' and path == '/session' and isinstance(value, dict) and value.get('sessionId'):
             try: raw_request('DELETE', '/session/'+value['sessionId'], timeout=10)
             except Exception: pass
-    return control.call(lambda: raw_request(method, path, data), late_session)
+    value=control.call(lambda: raw_request(method, path, data), late_session)
+    if monitor:
+        try:monitor.after(method,path,data,value)
+        except cancellation.Cancelled:raise
+        except page_diagnostics.ContextRestoreError:raise
+        except Exception:monitor.log('本次监控采样失败，原操作结果保留')
+    return value
+
+
+def compact_tree_settings(enabled):
+    if type(enabled) is not bool:raise ValueError('压缩页面树选项必须为布尔值')
+    return {'ignoreUnimportantViews':True,'snapshotMaxDepth':50,'waitForIdleTimeout':0,'waitForSelectorTimeout':0,'enableTopmostWindowFromActivePackage':True} if enabled else {}
+
+
+def capture_android_png(adb, device, runner):
+    data=runner([adb,'-s',device,'exec-out','screencap','-p']).stdout
+    if not isinstance(data,bytes) or not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise RuntimeError('ADB未返回有效PNG截图')
+    return data
 
 
 def run_job(jid, cfg):
+    cfg.setdefault('test_mode','manual')
     if cfg.get('live_updates'):
         importlib.reload(popup_handler);importlib.reload(login_flow);importlib.reload(automation)
     import base64
     job = JOBS[jid]
-    job['screenshot_policy']='raw_screenshots_v1'
+    CONTEXT.monitor=None
+    monitor=None
+    job['screenshot_policy']=cfg.get('screenshot_policy','anomalies_only')
     control = cancellation.Control(lambda: job.get('stop_requested', False))
     CONTEXT.control = control
     folder = ROOT / 'reports' / jid
@@ -189,7 +238,7 @@ def run_job(jid, cfg):
         job['case_source']={'path':cfg['case_book']['path'],'sha256':hashlib.sha256(cfg['case_book']['content']).hexdigest(),'sheet':cfg.get('cases',{}).get('sheet',''),'priority':cfg.get('cases',{}).get('priority','')}
     sid = None
     login_cfg = cfg.get('login', {})
-    secrets = [login_cfg.get('account',''), login_cfg.get('password','')]+form_runner.values(cfg.get('explore',{}).get('form',{}))
+    secrets = [cfg['module_parameters'][s['parameter']] for s in cfg.get('module_script',{}).get('steps',[]) if s['action']=='input'] + [login_cfg.get('account',''), login_cfg.get('password','')]+form_runner.values(cfg.get('explore',{}).get('form',{}))
     capture_allowed = not login_cfg.get('enabled',False)
     staged_project = None
     probe_name = cfg.get('login_probe')
@@ -200,7 +249,7 @@ def run_job(jid, cfg):
     last_progress=[time.monotonic()]
     def log(message):
         last_progress[0]=time.monotonic()
-        text = automation.redact(message,secrets)
+        text = str(message) if str(message).startswith('接口调用原文：') else automation.redact(message,secrets)
         # 只保留主要日志：阶段、页面跳转、断言、弹窗与异常；过滤逐次点击等过程噪音。
         if noise_pattern.match(text.strip()):return
         with LOCK: job['logs'].append(text)
@@ -208,16 +257,20 @@ def run_job(jid, cfg):
     captured_pages = set()
     route_reader = None
     def shot(index, source=None):
-        if not capture_allowed or getattr(explorer,'auth_case_active',False):return
+        if not capture_allowed or getattr(explorer,'auth_case_active',False):return False
         source = source or request('GET', f'/session/{sid}/source')
         nodes = automation.parse_ui(source)
-        if any(n['secure'] for n in nodes) or popup_handler.has_popup(nodes):return
+        if any(n['secure'] for n in nodes):return False
+        if monitor and monitor.sensitive:return False
+        if job['screenshot_policy']!='all' and monitor and not monitor.should_capture(index):return False
         route = route_reader.read() if route_reader else ''
-        if route and re.match(r'^/(?:login|staffLogin)(?:/|$)',route):return
+        if route and re.match(r'^/(?:login|staffLogin)(?:/|$)',route):return False
         selected = tuple(n['label'] for n in nodes if n.get('selected'))
         page_key = (route, selected, automation.signature(nodes),index if cfg.get('test_mode')=='cases' else '')
-        if page_key in captured_pages:return
-        data = base64.b64decode(request('GET', f'/session/{sid}/screenshot'))
+        if page_key in captured_pages:return False
+        if platform=='Android' and cfg.get('compact_ui_tree'):
+            data=capture_android_png(android_tools()[0],device,lambda args:control.call(lambda:subprocess.run(args,capture_output=True,timeout=15,check=True)))
+        else:data = base64.b64decode(request('GET', f'/session/{sid}/screenshot'))
         stem = (f'{index:03d}' if isinstance(index,int) else str(index))
         try:
             # 压缩报告截图：整页截图缩到 1080 宽、JPEG 保存，明显缩小报告体积。
@@ -232,9 +285,51 @@ def run_job(jid, cfg):
             name=stem+'.png'
             (folder/name).write_bytes(data)
         captured_pages.add(page_key)
-        with LOCK: job['screenshots'].append('/reports/' + jid + '/' + name)
+        with LOCK:
+            url='/reports/' + jid + '/' + name
+            job['screenshots'].append(url)
+            job.setdefault('screenshot_records',[]).append({'url':url,'route':route,'page':str(index),
+                'abnormal':bool(monitor and (monitor.current_issues or monitor.should_capture(index))) or bool(re.search(r'failure|failed|error|blocked|^999$',str(index),re.I)),
+                'issues':list(monitor.current_issues) if monitor else []})
+        if monitor and (monitor.current_issues or monitor.should_capture(index)):monitor.note_capture('/reports/'+jid+'/'+name)
+        return True
     try:
         control.check()
+        # Inspect an existing Android device before preparing any source build.
+        if cfg.get('execution_mode')=='source' and not cfg.get('rebuild_app') and cfg.get('platform','Android')=='Android' and device and not device.startswith('avd:'):
+            package=cfg.get('bundle','').strip()
+            source_root=cfg.get('business_source') or cfg.get('source','')
+            if not package and source_root:
+                for name in ('build.gradle','build.gradle.kts'):
+                    file=Path(source_root)/'android/app'/name
+                    if file.is_file():
+                        matches=re.findall(r'applicationId\s*(?:=\s*)?["\']([A-Za-z0-9_.]+)["\']',file.read_text())
+                        if len(set(matches))==1:package=matches[0]
+            if package:
+                adb,_=android_tools()
+                installed=command([adb,'-s',device,'shell','pm','path',package])
+                if installed['ok'] and 'package:' in installed['output']:
+                    cfg=dict(cfg,execution_mode='installed',bundle=package,source='',app='')
+                    cfg['login']=dict(cfg.get('login',{}),enabled=False)
+                    for field in execution_profile.OBSERVERS:cfg.pop(field,None)
+                    cfg.pop('pipeline_build_reused',None)
+                    cfg.pop('reuse_test_build',None)
+                    capture_allowed=True
+                    app=''
+                    log('设备已安装目标应用，跳过编译与安装，沿用当前登录状态直接运行。')
+        cfg=execution_profile.normalize(cfg,runtime=True)
+        login_cfg=cfg.get('login',{})
+        proof=execution_profile.login_policy(login_cfg,cfg['execution_mode'])
+        probe_name=cfg.get('login_probe')
+        job['execution_profile']={'mode':cfg['execution_mode'],'preserves_installed_data':cfg['execution_mode']=='installed','login_verification':proof}
+        job['capabilities']={'native_tree':'not_checked','webview_dom':'not_checked','network_observer':'unavailable','route_observer':'unavailable'}
+        recorder=run_events.Recorder(folder,job)
+        import runtime_metrics
+        metrics_token=runtime_metrics.recorder.set(recorder)
+        recorder.emit('run_started',mode=cfg['execution_mode'],login_verification=proof)
+        adapter=app_adapter.load(cfg.get('adapter_id'))
+        if adapter:job['adapter']={k:adapter.get(k) for k in ('id','version','status')}
+        log('运行方式：'+{'installed':'已安装应用（保留版本和数据）','package':'指定安装包','source':'源码测试构建'}[cfg['execution_mode']])
         if cfg.get('pipeline_build_reused'):
             log('复用本轮已验证源码版本的测试包，跳过重复编译。')
             job['build_entrypoint']=cfg.get('entrypoint')
@@ -280,28 +375,40 @@ def run_job(jid, cfg):
                     flutter = str(candidate)
                     break
             if not flutter: raise ValueError('未找到 Flutter SDK，请先安装 Flutter 并配置 PATH。')
-            if cfg.get('test_mode') in ('explore','cases'):
+            if cfg.get('test_mode') in ('explore','cases','ai_live','manual'):
                 cfg['source_plan']=source_navigation.analyze(project)
                 job['source_navigation']=cfg['source_plan']
                 log('源码分析：识别 '+str(len(cfg['source_plan']['routes']))+' 个路由，'+str(len(cfg['source_plan']['entries']))+' 个跳转入口候选。')
-            if (login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china') or cfg.get('test_mode') in ('explore','cases'):
-                if login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china':login_probe.validate(project)
+            if (login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china') or cfg.get('test_mode') in ('explore','cases','ai_live','manual'):
+                if proof=='observer':login_probe.validate(project)
                 staged_project=ROOT/'.runtime'/('login-source-'+jid)
                 staged_project.parent.mkdir(parents=True,exist_ok=True)
                 log('创建独立源码副本，添加登录结果或页面路由观察器。')
                 host_runtime.copy_source(project,staged_project,control.run)
                 project=staged_project
-                if login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china':probe_name=login_probe.instrument(project)
-                if cfg.get('test_mode') in ('explore','cases'):
-                    source_navigation.instrument(project)
-                    cfg['route_tracking']=True
+                if proof=='observer':probe_name=login_probe.instrument(project)
+                if cfg.get('test_mode') in ('explore','cases','ai_live','manual'):
+                    try:
+                        source_navigation.instrument(project)
+                        cfg['route_tracking']=True
+                    except ValueError:
+                        if cfg.get('test_mode')=='cases':raise
+                        log('当前源码不支持路由插桩，将使用自动化观察耗时')
                 if cfg.get('test_mode')=='cases' and (cfg.get('pipeline_id') or language_workflow.applies(cfg['case_book'])):language_workflow.instrument(project)
+                cfg['flow_index']=flow_planner.source_index(project)
+                fields=[]
                 if cfg.get('test_mode')=='cases':
-                    cfg['flow_index']=flow_planner.source_index(project)
                     plans=case_runner.preview(cfg['case_book'],cfg.get('cases',{}),cfg.get('flow_index'))['cases']
                     fields=sorted({key for case in plans if case['plan'] for step in case['plan']['steps'] if step['action'] in ('save','dispatch') for key in step['api'].get('equals',{})})
-                    cfg['http_manifest']=http_probe.instrument(project,cfg['flow_index'],fields)
-                    log('已为测试副本添加 Dio 接口观察器；不记录请求参数、Header 或凭据。')
+                try:
+                    cfg['http_manifest']=http_probe.instrument(project,cfg['flow_index'],fields,monitor=True)
+                    log('已添加原生接口耗时与错误观察器；错误参数仅保留白名单字段，凭据和 Header 不记录')
+                except (OSError,ValueError):log('当前源码不支持 Dio 接口插桩，报告将标记原生接口观察不可用')
+                try:
+                    cfg['web_manifest']=web_diagnostics_source.instrument(project)
+                    log('已添加 WebView 创建、H5 可见内容和 XHR/fetch 观察器')
+                except (OSError,ValueError):log('当前源码不支持 WebView 插桩，H5 将尝试运行时观察并注明范围')
+                cfg['diagnostic_schema']='diagnostics_v2'
             args = ([flutter, 'build', 'apk'] if platform == 'Android' else [flutter, 'build', 'ios', '--simulator']) + ['-t',target_entry,'--debug']
             log('正在编译 Flutter 源码，启动入口：'+target_entry+'（debug 测试包）…')
             with (folder / 'build.log').open('w') as build_log:
@@ -320,7 +427,7 @@ def run_job(jid, cfg):
             if not artifact.exists(): raise RuntimeError('未找到编译产物，请查看 build.log。')
             app = str(artifact)
             log('编译完成：' + app)
-            if cfg.get('pipeline_id'):
+            if platform == 'Android':
                 app=cache_pipeline_build(cfg,artifact,probe_name)
                 if app!=str(artifact):log('已缓存本轮测试包；后续语言在源码及接口断言一致时直接复用。')
         if platform == 'Android' and device.startswith('avd:'):
@@ -332,7 +439,7 @@ def run_job(jid, cfg):
             control.check()
             proxy=local_emulator_proxy() if owned_avd else ''
             if proxy:log('Android 模拟器沿用 Mac 本机 HTTP 代理，转发网络连接。')
-            gpu_mode=cfg.get('emulator_gpu','swiftshader')
+            gpu_mode=cfg.get('emulator_gpu','host' if sys.platform=='darwin' else 'swiftshader')
             if gpu_mode not in ('swiftshader','host'):raise ValueError('不支持的模拟器 GPU 模式')
             if owned_avd:log('Android 模拟器渲染模式：'+gpu_mode)
             with (folder / 'emulator.log').open('w') as emulator_log:
@@ -365,7 +472,12 @@ def run_job(jid, cfg):
                 caps['appium:chromedriverExecutable']=driver
                 caps['appium:recreateChromeDriverSessions']=True
             # Flutter 页面有光标闪烁等持续动画，UiAutomator2 默认等待 UI 空闲会拖死页面树抓取。
-            caps.update({'appium:adbExecTimeout':60000,'appium:uiautomator2ServerLaunchTimeout':120000,'appium:appWaitForLaunch':True,'appium:enforceAppInstall':True,'appium:settings':{'waitForIdleTimeout':0,'actionAcknowledgmentTimeout':3000}})
+            # 真机上一律限制快照深度并跳过不重要节点：实测可把偶发 47~90 秒的页面树抓取压回秒级。
+            android_settings={'waitForIdleTimeout':0,'waitForSelectorTimeout':0,'actionAcknowledgmentTimeout':3000}
+            if not device.startswith('emulator-'):
+                android_settings.update({'ignoreUnimportantViews':True,'snapshotMaxDepth':50})
+                caps['appium:disableSuppressAccessibilityService']=True
+            caps.update({'appium:adbExecTimeout':60000,'appium:uiautomator2ServerLaunchTimeout':120000,'appium:uiautomator2ServerReadTimeout':30000,'appium:appWaitForLaunch':True,'appium:enforceAppInstall':bool(cfg.get('rebuild_app')) or cfg['execution_mode']=='package','appium:fullReset':False,'appium:settings':android_settings})
             if cfg.get('pipeline_id'):caps['appium:settings']['enableMultiWindows']=True
         if cfg.get('test_mode')=='cases' and language_workflow.applies(cfg.get('case_book',{})):
             caps['appium:appWaitForLaunch']=False
@@ -398,7 +510,7 @@ def run_job(jid, cfg):
             if not sizes or tuple(map(int,sizes[-1])) != (profile['width'],profile['height']): raise RuntimeError('实际屏幕分辨率与目标配置不一致，停止测试。')
             if not densities or int(densities[-1]) != profile['density']: raise RuntimeError('实际逻辑 DPI 与目标配置不一致，停止测试。')
             log('已核对实际 Android API 主版本、分辨率和逻辑 DPI。')
-        if platform == 'Android' and app:
+        if platform == 'Android' and app and cfg['execution_mode']=='source':
             # Flutter debug 包 versionCode 恒定，Appium 可能跳过安装导致探针不匹配；
             # 用 aapt2 解析包名后强制卸载旧包，确保安装的是本次构建。
             sdk = host_runtime.sdk_root()
@@ -408,36 +520,88 @@ def run_job(jid, cfg):
                 m = re.search(r"package: name='([^']+)'", info['output']) if info['ok'] else None
                 if m:
                     adb,_ = android_tools()
-                    command([adb,'-s',device,'uninstall',m.group(1)])
-                    log('已卸载旧版本，将安装本次构建的测试包。')
+                    package=m.group(1)
+                    installed=command([adb,'-s',device,'shell','pm','path',package])
+                    if cfg.get('rebuild_app'):
+                        removed=command([adb,'-s',device,'uninstall',package])
+                        if not removed['ok'] and installed['ok'] and 'package:' in installed['output']:raise RuntimeError('卸载旧包失败：'+removed['output'])
+                        log('已请求重新编译并安装，将安装本次构建的测试包。')
+                    elif installed['ok'] and 'package:' in installed['output']:
+                        caps.pop('appium:app',None)
+                        caps['appium:appPackage']=package
+                        log('模拟器已安装该应用，直接启动，跳过安装。')
         if cfg.get('live_updates'):runtime_health.restart(ROOT,log)
         if platform == 'Android' and device.startswith('emulator-'):
             adb, _ = android_tools()
             stylus = command([adb, '-s', device, 'shell', 'settings', 'put', 'secure', 'stylus_handwriting_enabled', '0'])
             if stylus['ok']: log('已关闭模拟器触控笔手写输入，避免 "Try out your stylus" 引导弹窗打断测试。')
+        if platform == 'Android':
+            # 上次会话异常退出后，设备端 UiAutomator2 服务可能残留并卡死（D 状态），
+            # 导致新会话所有命令代理超时。会话创建前强制清理一次，Appium 会重新拉起。
+            adb, _ = android_tools()
+            command([adb, '-s', device, 'shell', 'am', 'force-stop', 'io.appium.uiautomator2.server'])
+            command([adb, '-s', device, 'shell', 'am', 'force-stop', 'io.appium.uiautomator2.server.test'])
+        if platform=='Android' and cfg.get('compact_ui_tree'):
+            caps['appium:disableSuppressAccessibilityService']=True
+            caps['appium:uiautomator2ServerReadTimeout']=30000
+        if platform=='Android' and cfg.get('ai_live'):
+            # Live workflows can recover through ADB screenshots; do not spend
+            # thirty seconds waiting for an unresponsive UIA2 proxy command.
+            caps['appium:uiautomator2ServerReadTimeout']=15000
+            log('AI 自动化驱动响应上限：15 秒；读取失败后使用视觉恢复，操作不自动重放。')
         log('连接本机 Appium，创建测试会话…')
-        session = request('POST', '/session', {'capabilities': {'alwaysMatch': caps, 'firstMatch': [{}]}})
+        session = session_startup.create(caps, request, command, android_tools()[0] if platform=='Android' else None, log)
         sid = session['sessionId']
+        tree_settings=compact_tree_settings(cfg.get('compact_ui_tree',False))
+        if platform=='Android' and tree_settings:
+            request('POST',f'/session/{sid}/appium/settings',{'settings':tree_settings})
+            job['ui_tree_mode']='compact'
+            log('真机压缩页面树已启用，限制快照深度并关闭空闲等待。')
+        if platform=='Android':
+            try:
+                actual_settings=request('GET',f'/session/{sid}/appium/settings')
+                if not isinstance(actual_settings,dict):raise RuntimeError('驱动设置响应不是对象')
+                job['uiautomator2_settings']={k:actual_settings.get(k) for k in ('waitForIdleTimeout','waitForSelectorTimeout','snapshotMaxDepth','ignoreUnimportantViews','enableMultiWindows','enableTopmostWindowFromActivePackage')}
+                log('已读取设备端实际 UiAutomator2 设置：'+json.dumps(job['uiautomator2_settings'],ensure_ascii=False))
+            except (RuntimeError,TimeoutError) as error:
+                log('设备端驱动设置读取失败：'+type(error).__name__)
         if app: job['artifact'] = app
         job['build_entrypoint']=cfg.get('entrypoint',job.get('build_entrypoint','lib/main.dart'))
         if probe_name:job['login_probe']=probe_name
         def capture_state(name, source):
             nodes=automation.parse_ui(source)
             if any(n['secure'] for n in nodes) or popup_handler.debug_panel_open(nodes):return
-            shot(name, source)
-            if not any(n['editable'] for n in nodes):
+            saved=shot(name, source)
+            if saved and not any(n['editable'] for n in nodes):
                 (folder / (str(name)+'.xml')).write_text(automation.scrub_xml(source,explorer.secrets),encoding='utf-8')
         capabilities=session.get('capabilities',{})
         key='appPackage' if platform=='Android' else 'bundleId'
         bundle=capabilities.get(key) or capabilities.get('appium:'+key) or cfg.get('bundle')
         if cfg.get('source_plan'):job['source_navigation']=cfg['source_plan']
-        if cfg.get('route_tracking'):
+        if bundle:
             route_reader=source_navigation.RouteReader(platform,device,bundle,command,android_tools()[0])
         def tracked_call(method,path,data=None):
             last_progress[0]=time.monotonic()
-            return request(method,path,data)
+            endpoint=re.sub(r'/session/[^/]+','/session/[session]',path.split('?')[0])
+            endpoint=re.sub(r'/element/[^/]+','/element/[element]',endpoint)
+            request_id=os.urandom(4).hex()
+            started=time.monotonic()
+            log(f'Appium 请求开始 id={request_id} {method} {endpoint}')
+            try:
+                value=recorder.call(run_events.operation(method,path),lambda:request(method,path,data))
+            except Exception as error:
+                log(f'Appium 请求失败 id={request_id} {method} {endpoint} 耗时={time.monotonic()-started:.2f}s 异常={type(error).__name__}')
+                raise
+            log(f'Appium 请求完成 id={request_id} 耗时={time.monotonic()-started:.2f}s')
+            if path.endswith('/source') and isinstance(value,str) and value.lstrip().startswith('<'):job['capabilities']['native_tree']='observed'
+            return value
         explorer = automation.Explorer(tracked_call,sid,platform,log,capture_state,lambda:job.get('stop_requested',False),secrets,
             shell=(lambda args,d=device: command([android_tools()[0],'-s',d,'shell']+args)) if platform=='Android' else None)
+        explorer.progress_tick=lambda:last_progress.__setitem__(0,time.monotonic())
+        explorer.h5_visual_config={'midscene_model':cfg.get('midscene_model') or 'glm-5.3-flashx','region':cfg.get('region','cn')}
+
+        if platform=='Android':
+            explorer.native_health_probe=lambda:uia_health.blocked(android_tools()[0],device)
         def watchdog():
             # Appium 驱动在个别 WebView 上可能死锁，指令只能靠 socket 超时逐个失败。
             # 连续 7 分钟既无指令返回也无日志，就自动停止任务，避免无限卡住。
@@ -449,9 +613,18 @@ def run_job(jid, cfg):
                     break
         threading.Thread(target=watchdog,daemon=True).start()
         explorer.app_bundle = bundle if platform=='iOS' and bundle else ''
+        explorer.adapter=adapter
+        explorer.capability_record=job['capabilities']
         explorer.route_reader = route_reader
         explorer.app_package = bundle if platform=='Android' and bundle else ''
         explorer.device_id = device
+        job['app_identity']={'bundle':bundle or cfg.get('bundle',''),'version_name':'unknown','version_code':'unknown'}
+        if platform=='Android' and bundle and cfg['execution_mode']=='installed':
+            info=command([android_tools()[0],'-s',device,'shell','dumpsys','package',bundle])
+            if info['ok']:
+                for field,pattern in [('version_name',r'\bversionName=([^\s]+)'),('version_code',r'\bversionCode=(\d+)'),('last_update_time',r'\blastUpdateTime=([^\r\n]+)')]:
+                    match=re.search(pattern,info['output'])
+                    if match:job['app_identity'][field]=match[1]
         if platform=='Android':
             def cleanup_shell(args,d=device):
                 value=subprocess.run([android_tools()[0],'-s',d,'shell']+args,capture_output=True,text=True,timeout=10)
@@ -468,11 +641,26 @@ def run_job(jid, cfg):
         if cfg.get('http_manifest'):
             explorer.http_probe=http_probe.Probe(platform,device,bundle,cfg['http_manifest'],command,android_tools()[0])
             job['http_manifest']=cfg['http_manifest']
-        if login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china':
+        if cfg.get('web_manifest'):
+            explorer.web_probe=web_diagnostics_source.Probe(platform,device,bundle,cfg['web_manifest'],command,android_tools()[0])
+            job['web_manifest']=cfg['web_manifest']
+        explorer.diagnostic_clock=web_diagnostics_source.DeviceClock(platform,device,command,android_tools()[0])
+        if not getattr(explorer,'web_probe',None) and bundle:
+            try:
+                explorer.web_probe=web_diagnostics_source.discover(platform,device,bundle,command,android_tools()[0])
+                if explorer.web_probe:log('已读取当前已安装测试包的 WebView 生命周期观察器。')
+                else:log('当前包无 WebView 创建事件；将记录原生点击至 H5 就绪的观察总时长，分段实测需带观察器的源码测试包。')
+            except (OSError,ValueError):log('当前包 WebView 生命周期观察器不可读，将使用运行时观察。')
+        monitor=page_diagnostics.Monitor(explorer,job,folder,lambda:capture_allowed and not getattr(explorer,'auth_case_active',False),log)
+        CONTEXT.monitor=monitor
+        explorer.diagnostics_monitor=monitor
+        if login_cfg.get('enabled') and login_cfg.get('flow')=='keenon_china' and proof=='observer':
             capabilities=session.get('capabilities',{})
             key='appPackage' if platform=='Android' else 'bundleId'
             bundle=capabilities.get(key) or capabilities.get('appium:'+key) or cfg.get('bundle')
             explorer.login_probe=login_probe.Probe(platform,device,bundle,probe_name or '',command,android_tools()[0])
+        job['capabilities']['network_observer']='available' if getattr(explorer,'http_probe',None) else 'unavailable'
+        job['capabilities']['route_observer']='available' if route_reader and (cfg.get('route_tracking') or route_reader.read()) else 'unavailable'
         if cfg.get('test_mode')=='cases' and language_workflow.applies(cfg['case_book']):
             if platform!='Android' or not login_cfg.get('enabled') or login_cfg.get('flow')!='keenon_china':raise ValueError('语言完整回归需 Android 测试副本并启用内置账号密码登录')
             capture_allowed=True
@@ -484,7 +672,7 @@ def run_job(jid, cfg):
                 (folder/'case-results.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
             results=language_workflow.run(explorer,cfg['case_book'],login_cfg,cfg['flow_index']['project'],log,suite_capture,suite_progress,control.sleep)
             job['login']=getattr(explorer,'login_result',{'status':'not_confirmed'})
-            job['status']='stopped' if job.get('stop_requested') else 'failed' if any(r['result']=='fail' for r in results) else 'passed'
+            job['status']='stopped' if job.get('stop_requested') else 'failed' if any(r['result']=='fail' for r in results) else 'review' if any(r['result']=='review' for r in results) else 'passed'
             return
         if cfg.get('language',{}).get('phase')=='before_login':job['language']=explorer.switch_language(cfg['language'])
         auth_planned=cfg.get('test_mode')=='cases' and any(c.get('plan',{}).get('start_state','home')!='home' for c in case_runner.preview(cfg['case_book'],cfg.get('cases',{}),cfg.get('flow_index'))['cases'] if c.get('plan'))
@@ -503,6 +691,7 @@ def run_job(jid, cfg):
             job['login'] = {'status':'deferred','reason':'按用例分别准备登录前或登录后状态'} if auth_planned else explorer.login(login_cfg)
         except automation.LoginBlocked:raise
         except Exception as e:
+            if getattr(explorer,'login_timeout_diagnostic',None):job['login_diagnostic']=explorer.login_timeout_diagnostic
             raise automation.LoginBlocked('登录未完成，请检查登录控件或账号配置：'+automation.redact(e,secrets)) from e
         explorer.allow_source_recovery=job.get('login',{}).get('status')=='confirmed'
         explorer.recovery_events=[]
@@ -518,10 +707,19 @@ def run_job(jid, cfg):
             login_flow.wait_post_login(explorer,control.sleep)
         control.sleep(3)
         if not auth_planned and not cfg.get('cases',{}).get('start_from_current'):
-            try:
-                login_flow.dismiss_onboarding(explorer)
-            except Exception as e:
-                log('引导弹窗清理中断：'+automation.redact(e,secrets)[:120])
+            if cfg.get('test_mode') == 'ai_live':
+                # The live loop identifies actual overlays before deciding actions,
+                # and can recover a failed native tree through Midscene/ADB.
+                # A mandatory native preflight would prevent that recovery entirely.
+                log('进入 AI 页面识别：仅检测到遮挡弹窗时处理，无弹窗则直接执行目标。')
+                explorer.visual_source_fallback = True
+            else:
+                try:
+                    log('正在检查当前页面；仅在识别到引导或权限弹窗时处理。')
+                    login_flow.dismiss_onboarding(explorer)
+                    log('页面检查完成，继续执行测试。')
+                except Exception as e:
+                    raise automation.LoginBlocked('启动页面检查失败（未确认存在弹窗）：'+automation.redact(e,secrets)[:120]) from e
         if cfg.get('pipeline_id') and platform=='Android':
             catalog=language_tests.load_runtime_aliases(explorer)
             if catalog:job['runtime_language_catalog']=catalog
@@ -547,7 +745,28 @@ def run_job(jid, cfg):
                 results=case_runner.run(explorer,cfg['case_book'],cfg.get('cases',{}),log,case_capture,case_progress,lambda:job.get('stop_requested',False),control.sleep)
             job['case_results']=results
             if auth_planned:job['login']=getattr(explorer,'login_result',job['login'])
-            job['status']='stopped' if job.get('stop_requested') else 'failed' if any(r['result']=='fail' for r in results) else 'passed'
+            job['status']='stopped' if job.get('stop_requested') else 'failed' if any(r['result']=='fail' for r in results) else 'review' if any(r['result']=='review' for r in results) else 'passed'
+            return
+        if cfg.get('test_mode') == 'ai_live':
+            explorer.business_groups=semantic_steps.load_groups(cfg.get('business_source') or cfg.get('source',''),cfg.get('h5_source',''))
+            try:
+                explorer.knowledge_scope=action_knowledge.application_scope(dict(cfg,installed_app_identity=job.get('app_identity')),bundle,job.get('artifact',''))
+                log('已确认操作知识库作用域；实际启用状态将在执行器初始化后记录' if explorer.knowledge_scope else '当前无法确认 App，本次不启用知识库复用')
+            except Exception:log('本次知识库版本识别失败，继续使用正常决策')
+            def live_progress(result):
+                job['ai_operator']=json.loads(json.dumps(result))
+                (folder/'ai-operator.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
+            try:
+                result=ai_operator.run(explorer,cfg['ai_live'],live_progress)
+            except Exception as error:
+                result=job.get('ai_operator',{'steps':[],'checkpoints':[]})
+                result.update(status='stopped' if job.get('stop_requested') else 'blocked',termination='stopped' if job.get('stop_requested') else 'operation_error')
+                result['termination_detail']='用户已停止任务。' if job.get('stop_requested') else automation.redact(str(error),explorer.secrets)[:1000]
+                live_progress(result)
+                raise
+            job['ai_operator']=result
+            job['status']='stopped' if job.get('stop_requested') else 'review'
+            log('AI 自主操作结束：'+result['termination']+'；原因：'+str(result.get('termination_detail') or '请复核检查点及操作报告'))
             return
         if cfg.get('test_mode','manual') == 'explore':
             job['exploration'] = explorer.explore(dict(cfg.get('explore',{}),source_plan=cfg.get('source_plan',{})))
@@ -556,11 +775,23 @@ def run_job(jid, cfg):
             job['status'] = automation.exploration_status(result)
             return
         explorer.business_groups=semantic_steps.load_groups(cfg.get('business_source') or cfg.get('source',''),cfg.get('h5_source','')) if any(s.get('action')=='business' for s in steps) else []
-        shot(0)
+        if cfg.get('module_script'):
+            job['module_script']={k:cfg['module_script'][k] for k in ('id','name','status')}
+            job['module_candidate']=module_scripts.validate(cfg['module_script'])
+        else:shot(0)
         for i, step in enumerate(steps, 1):
             if job.get('stop_requested'):job['status']='stopped';return
             action = step['action']
             log(f'步骤 {i}: {action}')
+            if cfg.get('module_script'):
+                started=time.monotonic()
+                try:
+                    evidence=module_scripts.perform(tracked_call,f'/session/{sid}',step,cfg.get('module_parameters',{}),control.sleep,lambda:job.get('stop_requested',False))
+                except Exception:
+                    job.setdefault('custom_step_results',[]).append({'step':i,'action':action,'status':'failed','elapsed_ms':round((time.monotonic()-started)*1000)})
+                    raise
+                job.setdefault('custom_step_results',[]).append({'step':i,**evidence})
+                continue
             if action=='business':
                 log('业务步骤：'+automation.redact(step['instruction'],secrets))
                 evidence=semantic_steps.perform(explorer,step,control.sleep,job.get('login',{}))
@@ -570,9 +801,11 @@ def run_job(jid, cfg):
                 job.setdefault('custom_step_results',[]).append({'step':i,**evidence})
             elif action in ('tap', 'input', 'assert'):
                 selector = step.get('by', 'accessibility id')
-                if selector not in ('accessibility id', 'id', 'xpath', '-android uiautomator', '-ios predicate string'): raise ValueError('不支持的定位方式')
-                element = request('POST', f'/session/{sid}/element', {'using': selector, 'value': step['value']})
-                eid = element.get('element-6066-11e4-a52e-4f735466cecf') or element.get('ELEMENT')
+                if selector not in ('accessibility id', 'id', 'xpath', '-android uiautomator', '-ios predicate string','target'): raise ValueError('不支持的定位方式')
+                if selector=='target':eid=explorer.find(step)
+                else:
+                    element = request('POST', f'/session/{sid}/element', {'using': selector, 'value': step['value']})
+                    eid = element.get('element-6066-11e4-a52e-4f735466cecf') or element.get('ELEMENT')
                 if action == 'tap': request('POST', f'/session/{sid}/element/{eid}/click', {})
                 if action == 'input': request('POST', f'/session/{sid}/element/{eid}/value', {'text': step['text']})
             elif action == 'wait': control.sleep(min(max(float(step.get('seconds', 1)), 0), 30))
@@ -581,23 +814,34 @@ def run_job(jid, cfg):
                 points = [int(step[k]) for k in ('x1', 'y1', 'x2', 'y2')]
                 request('POST', f'/session/{sid}/actions', {'actions': [{'type': 'pointer', 'id': 'finger', 'parameters': {'pointerType': 'touch'}, 'actions': [{'type': 'pointerMove', 'duration': 0, 'x': points[0], 'y': points[1]}, {'type': 'pointerDown', 'button': 0}, {'type': 'pointerMove', 'duration': 600, 'x': points[2], 'y': points[3]}, {'type': 'pointerUp', 'button': 0}]}]})
             elif action != 'screenshot': raise ValueError('未知操作: ' + action)
-            shot(i)
             source = request('GET', f'/session/{sid}/source')
-            if not popup_handler.debug_panel_open(automation.parse_ui(source)):
+            saved=shot(i,source)
+            if saved and not popup_handler.debug_panel_open(automation.parse_ui(source)):
                 (folder / f'{i:03d}.xml').write_text(automation.scrub_xml(source,secrets), encoding='utf-8')
-        log('步骤执行完成。截图需人工复核；本版不自动判断视觉缺陷或采集网络请求。')
+        log('步骤执行完成。耗时、接口与异常已记录；视觉疑点需复核，正常页面不保存截图。')
         job['status'] = 'passed'
     except Exception as e:
         job['status'] = 'stopped' if job.get('stop_requested') else 'blocked' if isinstance(e,automation.LoginBlocked) or not sid else 'failed'
+        job['failure_reason']=automation.redact(str(e),secrets)
+        job['failure_category']='precondition_or_login' if isinstance(e,automation.LoginBlocked) else 'configuration' if isinstance(e,ValueError) else 'tool_error'
         log(str(e))
         if sid and capture_allowed and not job.get('stop_requested'):
             try: shot(999)
             except Exception: pass
     finally:
+        if 'metrics_token' in locals():runtime_metrics.recorder.reset(metrics_token)
+        if 'recorder' in locals():recorder.emit('run_finished',status=job.get('status'),failure_category=job.get('failure_category'))
+        if explorer is not None and isinstance(getattr(explorer,'login_diagnostics',None),dict):
+            job['login_diagnostics']={k:v for k,v in explorer.login_diagnostics.items() if k in ('phase','editable_fields','secure_fields','raw_switch_labels','unique_switch_controls','switch_clicks')}
+        CONTEXT.monitor=None
         CONTEXT.control = cancellation.Control()
+        if monitor:
+            try:monitor.finalize()
+            except Exception:log('诊断汇总保存失败，已有操作记录保留')
+            if job.get('status')=='passed' and (monitor.result['issues'] or monitor.result['api_errors']):job['status']='review'
         if 'explorer' in locals() and getattr(explorer,'http_probe',None):
             try:
-                trace=explorer.http_probe.read()
+                trace=diagnostic_privacy.trace(explorer.http_probe.read(),explorer.secrets)
                 (folder/'http-events.json').write_text(json.dumps(trace,ensure_ascii=False,indent=2))
                 job['http_events']='/reports/'+jid+'/http-events.json'
             except Exception as error:log('接口观察数据读取失败：'+str(error))
@@ -700,7 +944,7 @@ def _run_batch(entries):
         with LOCK: JOBS[jid]['status'] = 'running'
         platform = cfg['platform']
         if cfg.get('source') and platform in artifacts:
-            cfg = dict(cfg, business_source=cfg.get('source',''), source='', app=artifacts[platform]['app'],login_probe=artifacts[platform].get('login_probe'), source_plan=artifacts[platform].get('source_plan'),route_tracking=artifacts[platform].get('route_tracking'),http_manifest=artifacts[platform].get('http_manifest'),flow_index=artifacts[platform].get('flow_index'))
+            cfg = dict(cfg, business_source=cfg.get('source',''), source='', app=artifacts[platform]['app'],login_probe=artifacts[platform].get('login_probe'), source_plan=artifacts[platform].get('source_plan'),route_tracking=artifacts[platform].get('route_tracking'),http_manifest=artifacts[platform].get('http_manifest'),web_manifest=artifacts[platform].get('web_manifest'),flow_index=artifacts[platform].get('flow_index'))
         try:
             run_job(jid,cfg)
         except Exception as e:
@@ -708,7 +952,7 @@ def _run_batch(entries):
                 JOBS[jid]['status'] = 'failed'
                 JOBS[jid]['logs'].append('任务异常：'+automation.redact(e,[cfg.get('login',{}).get('account',''),cfg.get('login',{}).get('password','')]))
                 JOBS[jid]['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
-        if JOBS[jid].get('artifact'): artifacts[platform] = {'app':JOBS[jid]['artifact'],'login_probe':JOBS[jid].get('login_probe'),'source_plan':cfg.get('source_plan'),'route_tracking':cfg.get('route_tracking'),'http_manifest':cfg.get('http_manifest'),'flow_index':cfg.get('flow_index')}
+        if JOBS[jid].get('artifact'): artifacts[platform] = {'app':JOBS[jid]['artifact'],'login_probe':JOBS[jid].get('login_probe'),'source_plan':cfg.get('source_plan'),'route_tracking':cfg.get('route_tracking'),'http_manifest':cfg.get('http_manifest'),'web_manifest':cfg.get('web_manifest'),'flow_index':cfg.get('flow_index')}
     for _, cfg in entries:
         login = cfg.get('login',{})
         login.pop('account',None); login.pop('password',None)
@@ -718,12 +962,36 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status); self.send_header('Cache-Control','no-store'); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
+        if self.path=='/parsed_cases.js':
+            body=(ROOT/'parsed_cases.js').read_bytes()
+            self.send_response(200);self.send_header('Content-Type','text/javascript; charset=utf-8');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
+        if self.path=='/api/parsed-cases':
+            store=parsed_cases.Store(ROOT/'.runtime/parsed-case-library')
+            store.import_existing(ROOT/'.runtime/excel-ai-plans')
+            return self.send_json(store.listing())
+        if self.path.startswith('/api/parsed-cases/logs/'):
+            try:return self.send_json({'events':parsed_cases.Store(ROOT/'.runtime/parsed-case-library').logs(self.path.rsplit('/',1)[-1])})
+            except ValueError as error:return self.send_json({'error':str(error)},400)
+        if self.path.startswith('/api/parsed-cases/'):
+            try:return self.send_json(parsed_cases.Store(ROOT/'.runtime/parsed-case-library').get(self.path.rsplit('/',1)[-1]))
+            except ValueError as error:return self.send_json({'error':str(error)},404)
+        if self.path=='/api/preset-flows':return self.send_json(preset_flows.catalog())
+        if self.path=='/api/module-scripts':return self.send_json(module_scripts.listing(ROOT))
+        if self.path=='/api/action-knowledge':return self.send_json(action_knowledge.summary())
+        if self.path=='/api/setup-defaults':return self.send_json(setup_defaults.read(ROOT))
         if self.path=='/api/language-pipelines':
             with language_pipeline.LOCK:identifiers=list(language_pipeline.TASKS)
             return self.send_json([language_pipeline.snapshot(i) for i in identifiers])
         if self.path.startswith('/api/language-pipelines/'):
             try:return self.send_json(language_pipeline.snapshot(self.path.rsplit('/',1)[-1]))
             except ValueError as error:return self.send_json({'error':str(error)},404)
+        if self.path.startswith('/api/report/'):
+            jid=self.path.rsplit('/',1)[-1]
+            with LOCK: job=json.loads(json.dumps(JOBS.get(jid)))
+            if not job:return self.send_json({'error':'任务不存在'},404)
+            import html_report
+            body=html_report.render(job).encode('utf-8')
+            self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
         if self.path.startswith('/api/pdf/'):
             jid=self.path.rsplit('/',1)[-1]
             with LOCK: job=json.loads(json.dumps(JOBS.get(jid)))
@@ -748,8 +1016,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/api/catalog': return self.send_json({'profiles':matrix.catalog(), 'images':matrix.images()})
         if self.path == '/api/devices': return self.send_json(devices())
         if self.path == '/api/jobs':
+            import history_retention
+            with LOCK:
+                if time.monotonic()-getattr(history_retention,'last_check',-100000)>3600:
+                    history_retention.prune(ROOT,JOBS,deep=False)
+                    history_retention.last_check=time.monotonic()
             with LOCK: snapshot = json.loads(json.dumps(list(JOBS.values())))
             return self.send_json(snapshot)
+        if self.path == '/api/adapters':return self.send_json(app_adapter.catalog())
         if self.path == '/api/ai/status': return self.send_json(codebuddy_bridge.status())
         if self.path.startswith('/api/ai/generations/'):
             try:return self.send_json(codebuddy_bridge.generation_status(self.path.rsplit('/',1)[-1]))
@@ -761,12 +1035,35 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Cache-Control', 'no-store'); self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if target.suffix == '.xlsx' else 'image/png' if target.suffix == '.png' else 'application/json' if target.suffix == '.json' else 'text/plain; charset=utf-8' if target.suffix in ('.log', '.xml', '.md') else 'text/html; charset=utf-8'); self.end_headers(); self.wfile.write(target.read_bytes())
     def do_POST(self):
         if self.headers.get('Origin') not in (None, 'http://127.0.0.1:'+str(self.server.server_port)): return self.send_json({'error': '来源不允许'}, 403)
-        if self.path not in ('/api/run', '/api/batch','/api/steps/preview','/api/stop','/api/cases/preview','/api/ai/config','/api/ai/models/refresh','/api/ai/test','/api/ai/generate','/api/ai/generations','/api/ai/runtime','/api/login/credentials','/api/language-pipelines','/api/language-pipelines/stop'): return self.send_error(404)
+        if self.path not in ('/api/parsed-cases/update','/api/parsed-cases/delete','/api/parsed-cases/reanalyze','/api/module-scripts','/api/execution/preview','/api/run', '/api/batch','/api/steps/preview','/api/stop','/api/cases/preview','/api/ai/config','/api/ai/models/refresh','/api/ai/test','/api/ai/generate','/api/ai/generations','/api/ai/runtime','/api/login/credentials','/api/language-pipelines','/api/language-pipelines/stop'): return self.send_error(404)
         try:
             length = int(self.headers.get('Content-Length', 0))
             if length > 2000000: raise ValueError('请求过大')
             cfg = json.loads(self.rfile.read(length))
             if not isinstance(cfg,dict):raise ValueError('请求必须是对象')
+            if self.path.startswith('/api/parsed-cases/'):
+                store=parsed_cases.Store(ROOT/'.runtime/parsed-case-library')
+                try:
+                    if self.path=='/api/parsed-cases/update':
+                        result=store.update_case(cfg.get('id'),cfg.get('revision'),cfg.get('case_id'),cfg.get('changes')) if cfg.get('case_id') else store.rename(cfg.get('id'),cfg.get('revision'),cfg.get('name'))
+                        return self.send_json(result)
+                    if self.path=='/api/parsed-cases/delete':return self.send_json(store.delete(cfg.get('id'),cfg.get('revision'),cfg.get('case_id')))
+                    if self.path=='/api/parsed-cases/reanalyze':
+                        suite=store.get(cfg.get('id'));store.check(suite,cfg.get('revision'))
+                        settings={k:cfg[k] for k in parsed_cases.SETTINGS if k in cfg}
+                        ids=cfg.get('case_ids')
+                        if ids is not None and (not isinstance(ids,list) or not ids or set(ids)-{c['id'] for c in suite['cases']}):raise ValueError('请选择需要分析的用例')
+                        return self.send_json(codebuddy_bridge.start_generation({**settings,'parsed_library_id':suite['id'],'parsed_revision':suite['revision'],'parsed_case_ids':ids}),202)
+                except parsed_cases.Conflict as error:return self.send_json({'error':str(error)},409)
+            if self.path=='/api/module-scripts':return self.send_json(module_scripts.save(ROOT,cfg,cfg.get('run_id'),cfg.get('confirmed')),201)
+            if self.path in ('/api/run','/api/batch'):
+                cfg.pop('module_script',None)
+                if cfg.get('module_id') or cfg.get('module_draft') is not None:module_scripts.prepare(ROOT,cfg)
+            if self.path=='/api/execution/preview':
+                result=execution_profile.preview(cfg)
+                adapter=app_adapter.load(cfg.get('adapter_id'))
+                result['adapter']={k:adapter.get(k) for k in ('id','name','version','status')} if adapter else None
+                return self.send_json(result)
             if self.path=='/api/language-pipelines/stop':return self.send_json(language_pipeline.stop(cfg.get('id')))
             if self.path=='/api/language-pipelines':
                 with LOCK:
@@ -792,7 +1089,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/ai/generate':return self.send_json(codebuddy_bridge.generate(cfg))
             if self.path == '/api/ai/generations':return self.send_json(codebuddy_bridge.start_generation(cfg),202)
             if self.path=='/api/cases/preview':
-                book=excel_ai.apply(case_workbook.read(cfg.get('path','')),cfg)
+                book=parsed_cases.Store(ROOT/'.runtime/parsed-case-library').book(cfg['library_id'],cfg.get('library_revision'),cfg.get('case_ids')) if cfg.get('library_id') else excel_ai.apply(case_workbook.read(cfg.get('path','')),cfg)
                 import hashlib
                 index=flow_planner.source_index(cfg['source']) if cfg.get('source','').strip() else None
                 flows=flow_planner.build({'cases':case_runner.selected_cases(book,cfg)},index)
@@ -807,9 +1104,13 @@ class Handler(BaseHTTPRequestHandler):
                             if item['status']=='queued':item['status']='stopped'
                             item['logs'].append('收到停止请求，正在中断操作并清理测试资源。')
                 return self.send_json({'ok':True})
+            if cfg.get('screenshot_policy','anomalies_only') not in ('anomalies_only','all'):raise ValueError('截图策略无效')
             if cfg.get('test_mode')=='explore':
                 cfg.setdefault('explore',{})['form']=form_runner.validate(cfg.get('explore',{}).get('form'))
-            if cfg.get('test_mode','manual') not in ('manual','explore','cases','ai'):raise ValueError('未知测试模式')
+            if cfg.get('test_mode','manual') not in ('manual','explore','cases','ai','ai_live'):raise ValueError('未知测试模式')
+            if cfg.get('test_mode')=='ai_live':
+                cfg['ai_live']=ai_operator.validate(cfg.get('ai_live'))
+                if codebuddy_bridge.status()['busy']:raise ValueError('已有 AI 生成任务，请先等待或停止后再开始自主操作')
             if cfg.get('test_mode')=='ai':
                 generation=cfg.pop('ai_generation',None)
                 document=cfg.pop('ai_plan',None)
@@ -820,31 +1121,43 @@ class Handler(BaseHTTPRequestHandler):
                     if not document or not document.get('cases'):raise ValueError('生成任务尚未产出任何用例，请稍候再开始')
                     cfg['ai_generation']=generation
                 cfg['case_book']=codebuddy_bridge.book(document)
-                cfg['cases']={'start_from_current':cfg.pop('ai_start_from_current',False) is True}
+                cfg['cases']={'start_from_current':cfg.pop('ai_start_from_current',False) is True,'evidence_policy':cfg.get('case_evidence_policy','screenshots')}
                 if not any(c['plan_text'] for c in cfg['case_book']['cases']):raise ValueError('业务计划已生成，但尚无完整可执行用例；请查看各步骤的自动化适配说明')
                 cfg['test_mode']='cases'
             elif cfg.get('test_mode')=='cases':
                 options=cfg.get('cases',{})
                 if not isinstance(options,dict):raise ValueError('用例配置无效')
-                book=case_workbook.read(options.get('path',''))
-                import hashlib
-                if not options.get('fingerprint') or options['fingerprint']!=hashlib.sha256(book['content']).hexdigest():raise ValueError('用例文件已变化或尚未预览，请重新读取用例')
-                book=excel_ai.apply(book,options)
+                if options.get('library_id'):
+                    book=parsed_cases.Store(ROOT/'.runtime/parsed-case-library').book(options['library_id'],options.get('library_revision'),options.get('case_ids'))
+                    store=parsed_cases.Store(ROOT/'.runtime/parsed-case-library')
+                    store.record(store.get(options['library_id']),'test_requested','请求使用已保存用例测试',count=len(book['cases']))
+                    cfg['cases']={k:v for k,v in options.items() if k not in ('case_ids','sheet','priority','plans')}
+                    options=cfg['cases']
+                else:
+                    book=case_workbook.read(options.get('path',''))
+                    import hashlib
+                    if not options.get('fingerprint') or options['fingerprint']!=hashlib.sha256(book['content']).hexdigest():raise ValueError('用例文件已变化或尚未预览，请重新读取用例')
+                    book=excel_ai.apply(book,options)
                 preview=case_runner.preview(book,options)
                 if not preview['selected']:raise ValueError('当前筛选没有手机用例')
                 if not preview['ready']:raise ValueError('当前没有可执行用例，请先完成 AI 步骤生成并确认有可执行结果；测试未启动')
                 cfg['case_book']=book
-                if options.get('source','').strip():cfg['flow_index']=flow_planner.source_index(options['source'])
+            cfg=execution_profile.normalize(cfg)
+            app_adapter.load(cfg.get('adapter_id'))
+            if cfg['execution_mode']=='source' and cfg.get('test_mode')=='cases' and cfg.get('cases',{}).get('source','').strip():
+                cfg['flow_index']=flow_planner.source_index(cfg['cases']['source'])
             cached_build = False
-            if cfg.get('pipeline_id'):cached_build=apply_pipeline_build(cfg)
+            if cfg['execution_mode']=='source':cached_build=apply_pipeline_build(cfg)
             if cfg.get('reuse_test_build'):
                 cache=ROOT/'.runtime/flow-replay'
                 metadata=json.loads((cache/'build-metadata.json').read_text())
                 artifact=cache/'app-debug.apk'
                 if metadata.get('entrypoint','lib/main.dart')!=cfg.get('entrypoint','lib/main.dart'):raise ValueError('缓存测试包的启动入口不一致，请重新从源码构建')
                 if not artifact.is_file() or not re.fullmatch(r'devicecheck-login-[a-f0-9]{32}\.json',metadata.get('login_probe','')):raise ValueError('可重测的测试包不存在，请先从源码构建')
+                login_probe.verify_apk_probe(artifact,metadata['login_probe'])
                 cfg.update(source='',app=str(artifact),login_probe=metadata['login_probe'],source_plan=metadata['source_plan'],route_tracking=True)
                 cfg['http_manifest']=metadata.get('http_manifest')
+                cfg['web_manifest']=metadata.get('web_manifest')
                 cfg['flow_index']=metadata.get('flow_index',cfg.get('flow_index'))
                 cached_build=True
             if cfg.get('cases',{}).get('start_from_current'):
@@ -856,13 +1169,14 @@ class Handler(BaseHTTPRequestHandler):
             if login.get('enabled'):
                 if not all(isinstance(login.get(k),str) and 0<len(login[k])<=1024 for k in ('account','password')):raise ValueError('请填写有效的测试账号和密码')
                 if login.get('flow') not in (None,'custom','keenon_china'):raise ValueError('未知登录流程')
-                if login.get('flow')=='keenon_china':
+                proof=execution_profile.login_policy(login,cfg['execution_mode'])
+                if proof=='observer':
                     if not cached_build and not cfg.get('source','').strip():raise ValueError('内置流程需要 Flutter 源码来验证登录接口成功；安装包请选自定义页面标识验证。')
                     if not cached_build:login_probe.validate(Path(cfg['source']).expanduser().resolve())
-                if login.get('flow')!='keenon_china' and (not isinstance(login.get('success'),dict) or not login['success'].get('value','').strip()):raise ValueError('请填写登录成功标识')
+                if proof=='ui' and (not isinstance(login.get('success'),dict) or not login['success'].get('value','').strip()):raise ValueError('请填写登录成功标识')
                 if not isinstance(login.get('prepare',[]),list) or len(login.get('prepare',[]))>10 or not all(isinstance(x,str) and 0<len(x)<=512 for x in login.get('prepare',[])):raise ValueError('登录前操作需为最多 10 项按钮文字')
             if language_workflow.applies(cfg.get('case_book',{})):
-                if not login.get('enabled') or login.get('flow')!='keenon_china' or not cfg.get('source','').strip():raise ValueError('完整登录/语言回归需要填写 Flutter 源码，并启用内置账号密码自动登录；保存的密码可留空自动使用')
+                if not login.get('enabled') or login.get('flow')!='keenon_china' or login.get('verification')!='observer' or not cfg.get('source','').strip():raise ValueError('完整登录/语言回归需要填写 Flutter 源码，并启用内置账号密码自动登录；保存的密码可留空自动使用')
             if cfg.get('source','').strip():
                 cfg['entrypoint']=build_config.entrypoint(Path(cfg['source']).expanduser(),cfg.get('entrypoint','lib/main.dart'))
             if cfg.get('test_mode','manual')=='manual' and cfg.get('step_format')=='chinese':
@@ -918,16 +1232,26 @@ class Handler(BaseHTTPRequestHandler):
                     if not busy:message='上一批次正在收尾清理，请几秒后重试。'
                     else:message='请等待当前批量队列和资源清理完成（执行中 %d 个，排队 %d 个）'%(sum(j['status']=='running' for j in busy),sum(j['status']=='queued' for j in busy))
                     return self.send_json({'error':message},409)
-                reports = ROOT / 'reports'
-                if not pipeline_id:
-                    if reports.exists(): shutil.rmtree(reports)
-                    JOBS.clear()
+                # Keep previous runs for comparison; starting a run is not a retention policy.
                 for jid,target,label in entries:
                     JOBS[jid] = {'language':({k:target['language'][k] for k in ('code','name')} if target.get('language') else None),'id':jid,'batch':batch,'label':label,'status':'queued','device':target['device'],'platform':target['platform'],'logs':[],'screenshots':[],'started':time.strftime('%Y-%m-%d %H:%M:%S')}
                 BATCH_RUNNING.set()
             threading.Thread(target=run_batch,args=([(jid,target) for jid,target,label in entries],),daemon=True).start()
+            if cfg.get('case_book',{}).get('parsed_suite_id'):
+                try:
+                    store=parsed_cases.Store(ROOT/'.runtime/parsed-case-library')
+                    suite=store.get(cfg['case_book']['parsed_suite_id'])
+                    store.record(suite,'test_queued','测试已加入队列，共 '+str(len(entries))+' 个设备目标',count=len(cfg['case_book']['cases']),batch_id=batch)
+                except (OSError,ValueError):pass
             self.send_json({'id':batch,'count':len(entries)})
-        except Exception as e: self.send_json({'error': str(e)}, 400)
+        except Exception as e:
+            identifier=cfg.get('cases',{}).get('library_id') if isinstance(locals().get('cfg'),dict) and isinstance(cfg.get('cases'),dict) else None
+            if identifier:
+                try:
+                    store=parsed_cases.Store(ROOT/'.runtime/parsed-case-library')
+                    store.record(store.get(identifier),'test_not_started','测试未启动：'+str(e)[:300])
+                except (OSError,ValueError):pass
+            self.send_json({'error': str(e)}, 400)
 
 def restore_history():
     language_pipeline.restore_history()

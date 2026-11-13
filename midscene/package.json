@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@midscene/core": "1.17.7",
+    "@midscene/shared": "1.17.7"
+  }
+}

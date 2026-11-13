@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "keenon_legacy",
+  "name": "Keenon 旧包基础定位",
+  "version": "1",
+  "status": "candidate",
+  "note": "候选规则，首次需在目标旧包验证；不依赖源码标识，不承诺所有版本适用。",
+  "pages": {
+    "main": {"anchors": [["首页", "Home"], ["我的", "Mine", "My"]]},
+    "login": {"anchors": [["账号", "Account", "请输入账号", "Enter account"]]}
+  },
+  "targets": {
+    "main.home": {"page": "main", "role": "tap", "labels": ["首页", "Home"]},
+    "main.messages": {"page": "main", "role": "tap", "labels": ["消息", "Messages", "Message"]},
+    "main.mine": {"page": "main", "role": "tap", "labels": ["我的", "Mine", "My"]},
+    "login.password_mode": {"page": "login", "role": "tap", "labels": ["账号密码登录", "login by pwd", "Password login"]},
+    "login.account": {"page": "login", "role": "input", "secure": false, "labels": ["账号", "Account", "请输入账号", "Enter account"]},
+    "login.password": {"page": "login", "role": "input", "secure": true, "labels": ["密码", "Password", "请输入登录密码", "Please input password"]},
+    "login.submit": {"page": "login", "role": "tap", "labels": ["登录", "Login", "Log in", "Sign in"]}
+  }
+}

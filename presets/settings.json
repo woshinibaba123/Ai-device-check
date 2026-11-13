@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "module": "App · 我的与设置",
+  "flows": [
+    {
+      "id": "settings-read",
+      "name": "通用设置 · 只读检查",
+      "platforms": [
+        "App"
+      ],
+      "sources": [
+        "app:lib/widgets/currency/currency_setting.dart"
+      ],
+      "steps": [
+        "从 App 首页进入「我的」。",
+        "进入通用设置，记录可见设置项。",
+        "查看语言设置，记录当前语言和选项，不切换。",
+        "返回我的页面并核对。"
+      ],
+      "status": "source_candidate",
+      "parameters": [],
+      "readonly": true
+    },
+    {
+      "id": "language-switch",
+      "name": "语言切换与返回",
+      "readonly": false,
+      "platforms": [
+        "App"
+      ],
+      "parameters": [
+        {
+          "key": "language",
+          "label": "目标语言",
+          "default": "日语"
+        }
+      ],
+      "sources": [
+        "app:lib/services/language/language_store.dart"
+      ],
+      "steps": [
+        "进入我的、通用设置、语言设置。",
+        "选择 {{language}}，核对选中状态和页面实际文案。",
+        "返回我的页面并记录结果，不退出账号。"
+      ],
+      "status": "source_candidate"
+    }
+  ]
+}

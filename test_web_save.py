@@ -51,3 +51,41 @@ let matching=new XHR();matching.open('POST','/api/repair/save');matching.send('p
 '''.replace('new Function(INSTALL)','new Function('+json.dumps(web_save.INSTALL)+')')
         result=subprocess.run([node,'-e',script],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
+
+class CheckedDOMSubmitTests(unittest.TestCase):
+    def test_checked_dom_submit_has_one_click_and_requires_api_success(self):
+        web=Mock();web.e.base='/session/test';web.e.stopped.return_value=False
+        web.js.side_effect=[True,True,[{'status':200,'code':610000,'fields':{}}],True]
+        step={'action':'web_save','by':'css','value':'#repair button.btn-submit','click_mode':'dom_checked','api':{'method':'POST','path':'/api/devops/aftersale/work/order','codes':[610000]}}
+        result=web_save.perform(web,step,'submit')
+        self.assertTrue(result['clicked_once']);self.assertEqual(result['click_mode'],'dom_checked')
+        web.e.call.assert_not_called()
+        self.assertEqual(sum(c.args[0]==web_save.CHECKED_DOM_CLICK for c in web.js.call_args_list),1)
+
+    def test_checked_dom_submit_refuses_disabled_and_obscured_controls(self):
+        import subprocess,json,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script='const click=new Function('+json.dumps(web_save.CHECKED_DOM_CLICK)+''');
+let count=0;const e={isConnected:true,disabled:false,getAttribute:()=>null,getClientRects:()=>[{}],scrollIntoView:()=>{},getBoundingClientRect:()=>({left:0,top:0,width:20,height:20}),contains:()=>false,click:()=>count++};
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});global.innerWidth=400;global.innerHeight=800;
+global.document={elementFromPoint:()=>e};
+const ok=click(e);e.disabled=true;let disabled=false,obscured=false;
+try{click(e)}catch{disabled=true}e.disabled=false;document.elementFromPoint=()=>({});try{click(e)}catch{obscured=true}
+console.log(JSON.stringify({ok,count,disabled,obscured}));'''
+        self.assertEqual(json.loads(subprocess.check_output([node,'-e',script],text=True)),{'ok':True,'count':1,'disabled':True,'obscured':True})
+
+class NestedButtonTests(unittest.TestCase):
+    def test_text_span_resolves_to_hit_button(self):
+        import subprocess,json,shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('Node required')
+        script = 'const click=new Function('+json.dumps(web_save.CHECKED_DOM_CLICK)+');'+r"""
+let count=0;
+const button={isConnected:true,disabled:false,getAttribute:()=>null,getClientRects:()=>[{}],scrollIntoView:()=>{},getBoundingClientRect:()=>({left:10,top:10,width:80,height:30}),contains:()=>false,click:()=>count++};
+const span={closest:()=>button};
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});global.innerWidth=400;global.innerHeight=800;
+global.document={elementFromPoint:()=>button};
+if(click(span)!==true||count!==1)throw Error('nested button failed');
+"""
+        subprocess.run([node,'-e',script],check=True,capture_output=True,timeout=10)

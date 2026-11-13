@@ -10,7 +10,7 @@ def safe_fields(fields):
     if any(not isinstance(f,str) or not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*',f) or SENSITIVE.search(f) for f in fields):raise ValueError('响应字段无效或包含凭据/账号信息')
     return fields
 
-def instrument(project,index,fields=None):
+def instrument(project,index,fields=None,monitor=False):
     project=Path(project);file=project/'lib/http/dio_client.dart';text=file.read_text()
     marker='dio = Dio(options);'
     if text.count(marker)!=1:raise ValueError('Dio 初始化结构已变化，无法添加接口观察器')
@@ -79,9 +79,40 @@ class DeviceCheckHttpObserver extends Interceptor {
 }
 '''.replace('PATHS',json.dumps(paths,ensure_ascii=False)).replace('FIELDS',json.dumps(fields)).replace('FILE',name)
     if '/api/merchant/mobile/miniprogram/v2/call/task' not in paths:dart=dart.replace('requestShape(options.data)','<String, dynamic>{}')
+    if monitor:
+        helpers=r'''
+  Map<String,dynamic> safeParams(dynamic value) {
+    const keys=['storeId','robotId','sceneCode','targetPointId','page','pageNo','pageSize','limit','offset','type','status','language','lang','sort','order','category','issueType','problemType'];
+    if(value is String){try{value=jsonDecode(value);}catch(_){return {'_type':'string'};}}
+    if(value is! Map)return {};
+    final result=<String,dynamic>{};
+    for(final entry in value.entries.take(30)) {
+      final key=entry.key.toString(),v=entry.value;
+      if(!RegExp(r'^[\w.-]{1,64}$').hasMatch(key))continue;
+      result[key]=keys.contains(key)&&(v==null||v is num||v is bool||v is String&&v.length<=80&&!RegExp(r'@|\b\d{7,}\b|password|token|secret|bearer',caseSensitive:false).hasMatch(v))?v:'[redacted]';
+    }
+    return result;
+  }
+  Map<String,dynamic> diagnostic(RequestOptions options,Response? response,String? error,dynamic body) {
+    final code=body is Map?body['code']:null;
+    final failed=error!=null||(response?.statusCode!=null&&(response!.statusCode!<200||response.statusCode!>=400))||(code!=null&&!SUCCESS_CODES.contains(code.toString()));
+    final path=options.uri.path.replaceAll(RegExp(r'/(?:\d{7,}|[a-fA-F0-9-]{32,})(?=/|$)'),'/[id]');
+    final auth=RegExp(r'/(auth|oauth|login|token|password|captcha|sms)(/|$)',caseSensitive:false).hasMatch(path);
+    final start=options.extra['devicecheck_start_us'];
+    return {'url':options.uri.toString(),'failed':failed,'epoch_ms':DateTime.now().millisecondsSinceEpoch,'elapsed_ms':start is int?(DateTime.now().microsecondsSinceEpoch-start)/1000:null,'route':options.extra['devicecheck_route'],'params':{'query':options.queryParameters,'body':options.data?.toString()},'request_headers':options.headers,'response_body':response?.data,'response_headers':response?.headers.map};
+  }
+'''.replace('SUCCESS_CODES',json.dumps([str(c) for c in index['business_success_codes']]))
+        dart=dart.replace('  void record(RequestOptions options,',helpers+'\n  void record(RequestOptions options,')
+        dart=dart.replace('      if (!allowed.contains(path)) return;','')
+        dart=dart.replace("    options.extra['devicecheck_seq'] = ++counter;", "    options.extra['devicecheck_seq'] = ++counter;\n    options.extra['devicecheck_start_us'] = DateTime.now().microsecondsSinceEpoch;\n    try { options.extra['devicecheck_route'] = jsonDecode(File('${Directory.systemTemp.path}/devicecheck-route.json').readAsStringSync())['route']; } catch (_) {}")
+        start=dart.index("      events.add({'request_seq':")
+        end=dart.index(');\n      if(events.length',start)
+        expression=dart[start+len('      events.add('):end]
+        dart=dart[:start]+"      final event=<String,dynamic>"+expression+";\n      event.addAll(diagnostic(options,response,error,body));\n      events.add(event"+dart[end:]
+        dart=dart.replace("'code':code is num ? code : null", "'code':code is num || code is String && RegExp(r'^[A-Za-z0-9_-]{1,64}$').hasMatch(code) ? code : null")
     (project/'lib/devicecheck_http_observer.dart').write_text(dart)
     file.write_text("import 'package:app_phone/devicecheck_http_observer.dart';\n"+text.replace(marker,marker+'\n    dio.interceptors.add(DeviceCheckHttpObserver());'))
-    return {'file':name,'paths':paths,'response_fields':fields,'success_codes':index['business_success_codes'],'field_encoding':'missing_sentinel_v1','scope':'native_dio_only','request_shape_version':'call_task_fields_v1'}
+    return {'file':name,'paths':paths,'response_fields':fields,'success_codes':index['business_success_codes'],'field_encoding':'missing_sentinel_v1','scope':'native_dio_only','request_shape_version':'call_task_fields_v1','diagnostics_version':'native_diagnostics_v1' if monitor else None}
 
 class Probe:
     def __init__(self,platform,device,bundle,manifest,command,adb):

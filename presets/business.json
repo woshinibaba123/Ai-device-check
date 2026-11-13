@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "module": "完整业务流程",
+  "flows": [
+    {
+      "id": "nearby-full",
+      "name": "附近门店 · 定位、筛选、地图列表、详情、返回",
+      "scope": "business",
+      "sources": [
+        "app:lib/manager/location/location_manager.dart",
+        "app:lib/widgets/webview/webview_page.dart",
+        "h5:src/pages/report/views/storeMap/Index.vue",
+        "h5:src/pages/report/views/storeMap/data.js"
+      ],
+      "steps": [
+        "从已登录 App 首页点击附近门店，核对进入 H5 /storeMap。",
+        "识别定位授权状态；仅处理本次附近门店定位所需权限，拒绝或定位失败时记录实际提示，不循环请求。",
+        "等待地图和附近门店加载，记录定位点、门店标记、加载失败或空状态。",
+        "打开列表，记录第一张门店卡片的名称、距离、设备或任务信息；列表为空时记录，不编造门店。",
+        "逐一检查当前实际可见的距离、机型、区域、任务数筛选；记录原条件，选择真实选项、核对地图/列表变化后恢复原条件。行政区为单选，重复点击已选项不会取消；原来未选行政区时，使用重置再确定清除条件，不重复点已选项。重置后核对条件与原值一致再比较数量；未提供的筛选记录未提供。",
+        "返回地图，选择一个真实门店标记，记录实际出现的名称气泡或摘要；通过同名列表项或详情核对同一家门店，不与列表第一家不同门店比较，不要求页面提供不存在的独立卡片。",
+        "操作地图复位，核对中心和定位点变化。",
+        "点击真实门店标记或列表项后核对实际出现的摘要/详情；只有页面提供详情入口才进入详情，不把弹出摘要当作必有独立详情页。",
+        "详情存在复制地址入口时执行一次复制，核对即时复制提示或剪贴板结果；不要因提示短暂消失反复点击，不拨打电话或启动外部导航。",
+        "存在任务详情入口时进入只读查看并返回；无权限、无记录或入口不存在记录实际状态。",
+        "返回地图和列表，核对页面状态可用；最终返回 App 首页。"
+      ],
+      "parameters": [],
+      "readonly": true,
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ]
+    },
+    {
+      "id": "warranty-full",
+      "name": "保修 · 质保列表、到期状态、刷新、分页、返回",
+      "scope": "business",
+      "sources": [
+        "app:lib/utils/constants.dart#PER_WARRANTY",
+        "h5:src/pages/warranty/index.vue",
+        "h5:src/pages/warranty/api/index.js",
+        "app:lib/manager/msg_center_manager.dart",
+        "app:lib/widgets/mess/content/mess_new_center_content.dart"
+      ],
+      "steps": [
+        "从已登录 App 进入底部「消息」，查找「质保提醒」或保修消息分类，打开实际可见的最新质保消息或消息中的详情链接进入 H5 保修列表；不在首页工具区盲找保修入口。当前账号无质保消息、权限或消息链接时，记录实际列表及缺失条件，不把报修当保修。",
+        "核对页面标题、初次加载、列表或空状态，参数缺失/接口错误单独记录。",
+        "记录首条数据的门店名称、设备编码和保修剩余天数/到期提示。",
+        "逐条查看当前屏可见设备，核对门店、编码、到期状态字段，不把列表项当作不存在的可点击详情。",
+        "下拉刷新，等待刷新结束；核对条目重复、空白、加载不结束等问题。",
+        "向下滚动触发分页，核对数据追加、设备去重以及到底状态；最多5屏，内容不变则停止。",
+        "刷新后再次核对首条数据及分页状态，返回 App 原入口页面。"
+      ],
+      "parameters": [],
+      "readonly": true,
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ]
+    },
+    {
+      "id": "repair-full",
+      "name": "报修 · 表单字段、联动、协议与返回（填写并提交）",
+      "scope": "business",
+      "sources": [
+        "app:lib/utils/web_util.dart",
+        "h5:src/pages/report/views/repairForm/list.vue",
+        "h5:src/pages/report/views/repairForm/index.vue",
+        "h5:src/pages/report/views/repairForm/data.js"
+      ],
+      "steps": [
+        "从 App 首页点击「报修」，当前版本直接进入报修表单：先核对表单和实际路由 /repairForm，不寻找列表或新增按钮。仅当实际进入 /repairList 时，才检查可见状态并通过真实新增入口进入表单。",
+        "本流程以当前报修表单为主；工单列表、状态页签和分页不是表单的必测前置，不在表单内寻找这些控件。",
+        "记录表单标题、初始门店/设备、必填标识和已有默认值；不读取或修改历史工单。",
+        "按当前可见字段检查门店、设备、发生时间、问题类型、描述、附件、联系人、联系方式和协议；字段缺失时记录实际页面差异，不虚构字段。",
+        "打开门店下拉并搜索 {{store}}，从结果中选择该测试门店；核对设备列表随门店更新。",
+        "选择编码为 {{robot}} 的测试设备并核对门店归属；不存在则记录受阻，不替换为其他设备。",
+        "打开发生时间选择器，检查取消不修改原值；再打开后确认页面当前有效的默认时间并回读记录。自动生成数据无需精确对齐脚本生成时刻，不反复滚动小时、分钟追逐已过时的时间戳。",
+        "打开问题类型，选择 {{problem_type}}，核对它属于当前设备的可用类型；不存在则停止并记录。",
+        "填写问题描述「{{description}}」、联系人「{{contact}}」、联系方式「{{contact_method}}」；逐项核对回读、必填提示及长度限制。",
+        "使用附件 {{attachment}} 检查图片/视频上传、预览和删除；填写“无”时仅核对上传入口与格式/数量限制文字，记录未验证上传，不点击相机或上传框，不打开系统相册、相机或文件选择器。",
+        "打开隐私/服务协议，查看内容并返回；仅核对勾选与提交按钮状态。",
+        "填写并回读全部必填字段，勾选报修所需协议，点击提交；有本次报修确认弹窗时确认。核对成功提示及新工单详情或列表记录，记录工单编号与实际结果。提交结果不明时不得重复提交。",
+        "汇总本次表单字段、联动、时间和类型选择、协议、返回的实际结果；没有打开的工单列表不判通过。",
+        "所有表单填写完成后，核对必填项，按页面实际按钮点击保存、完成或提交；有本次提交确认弹窗时确认。提交后核对成功提示、详情或重新进入后的数据，不把点击当作成功。提交结果不明时先观察核对，不重复提交；校验或接口失败时记录异常页面和截图。"
+      ],
+      "parameters": [
+        {
+          "key": "store",
+          "label": "测试门店",
+          "default": "华住三期测试酒店"
+        },
+        {
+          "key": "robot",
+          "label": "测试设备编码",
+          "default": ""
+        },
+        {
+          "key": "occurred_at",
+          "label": "故障发生时间（页面支持的格式）",
+          "default": ""
+        },
+        {
+          "key": "problem_type",
+          "label": "问题类型（实际可用选项）",
+          "default": ""
+        },
+        {
+          "key": "description",
+          "label": "问题描述",
+          "default": "自动化测试报修，请按测试工单处理"
+        },
+        {
+          "key": "contact",
+          "label": "联系人",
+          "default": "测试人员"
+        },
+        {
+          "key": "contact_method",
+          "label": "测试联系方式（手机号或邮箱按页面规则）",
+          "default": ""
+        },
+        {
+          "key": "attachment",
+          "label": "测试附件绝对路径（无附件填写：无）",
+          "default": "无"
+        }
+      ],
+      "readonly": false,
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ]
+    },
+    {
+      "id": "reports-full",
+      "name": "运行报告 · 汇总筛选、日周报与返回",
+      "scope": "business",
+      "sources": [
+        "app:lib/widgets/store/item/store_report_item.dart",
+        "app:lib/widgets/store/content/store_list_agent_content.dart",
+        "app:lib/widgets/robot/robot_home.dart",
+        "h5:src/pages/report/router/index.js",
+        "h5:src/pages/report/views/reportRecord/index.vue",
+        "h5:src/pages/report/views/running/index.vue"
+      ],
+      "steps": [
+        "从已登录App首页查找明确的运行报告入口；无独立菜单时，查看首页门店统计卡片中「配送」文字右侧的小箭头，该箭头是门店报告入口，点击箭头而不是卡片正文，核对/reportRecord及实际门店。也可进入实际配送设备详情后点击可见的报告入口。不要在我的、关于、客服等无关菜单反复寻找，不凭独立菜单缺失就认定整个报告模块缺失。没有可见小箭头或报告入口时记录实际状态，不盲点卡片。",
+        "记录汇总数据、时间范围、加载、空状态和错误提示。",
+        "依次打开页面实际提供的日期、报告类型或设备筛选，先核对筛选真实含义，选择一个有效值，核对显示变化后恢复原条件；/reportRecord顶部「全部/送餐报告」是报告类型，不是设备编号，不存在的设备筛选记录未提供。",
+        "仅当当前页面有日/周报或运行记录入口时进入，先识别页面形态；/running 是日周报统计页面，不预设为任务记录列表。",
+        "逐一切换当前页面实际提供的日报、周报、月报、年报及日期，核对每个可见周期的图表、统计、单位与空数据；/reportRecord常见为周/月/年报，不能只看周报就概括全部完成。只有真实列表及详情入口可见时才查看记录详情。",
+        "通过当前页面返回入口返回报告；列表刷新/分页只在真实列表提供时检查，不在报表页盲目下拉或寻找分页。",
+        "返回报告汇总，核对页面恢复和数据展示，最终返回 App。"
+      ],
+      "parameters": [],
+      "readonly": true,
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ]
+    }
+  ]
+}

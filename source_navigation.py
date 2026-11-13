@@ -4,6 +4,47 @@ import re
 from pathlib import Path
 
 
+def control_labels(text, position):
+    """Find labels on the enclosing control, never a preceding sibling."""
+    masked=re.sub(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|//[^\n]*|/\*.*?\*/''',
+                  lambda m:' '*len(m[0]),text,flags=re.S)
+    stack=[];ranges=[]
+    for i,ch in enumerate(masked):
+        if ch=='(':stack.append(i)
+        elif ch==')' and stack:
+            start=stack.pop()
+            if start<position<i:ranges.append((start,i))
+    for start,end in sorted(ranges,key=lambda pair:pair[1]-pair[0]):
+        # Strip nested calls so another child's label cannot become this control's label.
+        body=text[start+1:end];mask=masked[start+1:end];depth=0;direct=[]
+        for ch,raw in zip(mask,body):
+            if ch in '([{':depth+=1
+            direct.append(raw if depth==0 else ' ')
+            if ch in ')]}':depth-=1
+        keys=re.findall(r'''\b(?:text|title|label):\s*['"]([^'"\n]+)['"]\.tr''',''.join(direct))
+        if keys:return list(dict.fromkeys(keys))
+        # A callback argument can be nested inside the control; do not cross a
+        # complete list of sibling controls looking for an unrelated title.
+        if re.search(r'\b(?:children|items)\s*:', ''.join(direct)):break
+    return []
+
+
+def navigation_label_keys(text, position):
+    keys=control_labels(text,position)
+    if keys:return keys
+    # A control often delegates navigation to a local callback method.
+    methods=list(re.finditer(r'^\s*(?:void|Future(?:<[^>]+>)?)\s+(\w+)\s*\([^\n]*\)\s*(?:async\s*)?\{',text,re.M))
+    method=next((m for i,m in enumerate(methods) if m.end()<=position<(methods[i+1].start() if i+1<len(methods) else len(text))),None)
+    if not method:return []
+    candidates=[]
+    for reference in re.finditer(r'\b'+re.escape(method[1])+r'\b',text):
+        if reference.start()==method.start(1):continue
+        found=control_labels(text,reference.start())
+        if found:candidates.append(tuple(found))
+    unique=set(candidates)
+    return list(next(iter(unique))) if len(unique)==1 else []
+
+
 def analyze(project):
     project=Path(project)
     routes={};pages={};entries=[];labels=set();translations={}
@@ -17,18 +58,26 @@ def analyze(project):
     for file in dart:
         if file.name not in ('routers.dart','routes.dart'):continue
         text=file.read_text()
-        routes.update(re.findall(r"static\s+const\s+(\w+)\s*=\s*['\"]([^'\"]+)['\"]",text))
-        pages.update(re.findall(r'GetPage\(\s*name:\s*(\w+)\s*,\s*page:\s*\(\)\s*=>\s*(?:const\s+)?(\w+)\(',text))
+        routes.update(re.findall(r"static\s+const\s+(?:String\s+)?(\w+)\s*=\s*['\"]([^'\"]+)['\"]",text))
+        for entry in re.finditer(r'GetPage\(\s*name:\s*(\w+)\s*,\s*page:\s*\(\)\s*=>\s*',text):
+            expression=text[entry.end():]
+            for _ in range(8):
+                constructor=re.match(r'(?:const\s+)?(\w+)\(',expression)
+                if not constructor:break
+                if constructor[1] not in ('AutomationTarget','AutomationInstance'):
+                    pages[entry[1]]=constructor[1];break
+                child=re.search(r'\bchild:\s*',expression[constructor.end():])
+                if not child:break
+                expression=expression[constructor.end()+child.end():]
     for file in dart:
         text=file.read_text()
         # Only a nearby UI label is a candidate. Runtime route observation confirms navigation.
         for match in re.finditer(r'Get\.(?:toNamed|offNamed|offAllNamed)\(\s*Routers\.(\w+)',text):
             name=match.group(1)
-            prefix=text[max(0,match.start()-1600):match.start()]
-            keys=re.findall(r"(?:text|title|label):\s*['\"]([^'\"]+)['\"]\.tr",prefix)
-            values=sorted(translations.get(keys[-1],set())) if keys else []
+            keys=navigation_label_keys(text,match.start())
+            values=sorted({value for key in keys for value in translations.get(key,set())})
             labels.update(values)
-            entries.append({'route':routes.get(name,name),'source':str(file.relative_to(project)),'line':text.count('\n',0,match.start())+1,'labels':values,'mapping':'static_candidate'})
+            entries.append({'route':routes.get(name,name),'source':str(file.relative_to(project)),'line':text.count('\n',0,match.start())+1,'labels':values,'label_keys':keys,'mapping':'static_candidate'})
     # Root tabs do not push routes; recognize their source-defined localized labels.
     tabs=[]
     for file in dart:
@@ -54,20 +103,31 @@ import 'package:flutter/widgets.dart';
 class DeviceCheckRouteObserver extends NavigatorObserver {
   static const allowed = ALLOWED;
   static final observed = <String>{};
-  void save(Route<dynamic>? route) {
+  static final events = <Map<String,dynamic>>[];
+  static final run = DateTime.now().microsecondsSinceEpoch.toString();
+  void save(Route<dynamic>? route, Route<dynamic>? previous) {
     final name = route?.settings.name;
     if (name == null || !allowed.contains(name)) return;
     try {
       observed.add(name);
-      File('${Directory.systemTemp.path}/devicecheck-route.json').writeAsStringSync(jsonEncode({'route': name, 'observed': observed.toList()}));
+      final started=DateTime.now().microsecondsSinceEpoch;
+      File('${Directory.systemTemp.path}/devicecheck-route.json').writeAsStringSync(jsonEncode({'run':run,'route': name, 'observed': observed.toList(),'events':events}));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          events.add({'from':allowed.contains(previous?.settings.name)?previous?.settings.name:null,'route':name,'route_started_us':started,'route_to_first_frame_ms':(DateTime.now().microsecondsSinceEpoch-started)/1000});
+          if(events.length>300)events.removeAt(0);
+          final file=File('${Directory.systemTemp.path}/devicecheck-route.json');
+          final current=jsonDecode(file.readAsStringSync());current['events']=events;file.writeAsStringSync(jsonEncode(current));
+        } catch (_) {}
+      });
     } catch (_) {}
   }
   @override
-  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) { save(route); }
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) { save(route, previousRoute); }
   @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) { save(previousRoute); }
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) { save(previousRoute, route); }
   @override
-  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) { save(newRoute); }
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) { save(newRoute, oldRoute); }
 }
 """.replace('ALLOWED',allowed)
     (project/'lib/devicecheck_route_observer.dart').write_text(code)
@@ -82,12 +142,16 @@ class RouteReader:
         try:
             if self.platform=='Android':
                 base='/data/user/0/'+self.bundle
-                result=self.command([self.adb,'-s',self.device,'shell','run-as',self.bundle,'cat',base+'/code_cache/devicecheck-route.json'])
-                text=result['output'] if result['ok'] else '{}'
+                text='{}'
+                for directory in ('code_cache','cache'):
+                    result=self.command([self.adb,'-s',self.device,'shell','run-as',self.bundle,'cat',base+'/'+directory+'/devicecheck-route.json'])
+                    if result['ok']:
+                        text=result['output'];break
             else:
                 result=self.command(['xcrun','simctl','get_app_container',self.device,self.bundle,'data'])
                 text=(Path(result['output'])/'tmp/devicecheck-route.json').read_text() if result['ok'] else '{}'
             data=json.loads(text);route=data.get('route','')
+            self.latest=data
             history=data.get('observed',[])
             if isinstance(history,list):self.observed.update(r for r in history if isinstance(r,str) and r.startswith('/'))
             if route:self.observed.add(route)

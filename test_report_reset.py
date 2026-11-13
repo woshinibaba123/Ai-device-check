@@ -31,12 +31,12 @@ class ReportResetTests(unittest.TestCase):
                         self.assertTrue(folder.exists());self.assertIn('old',app.JOBS)
                     else:
                         with opener.open(req) as r:self.assertEqual(r.status,200)
-                        self.assertEqual(folder.exists(),pipeline);self.assertEqual('old' in app.JOBS,pipeline)
-                        self.assertEqual(len(app.JOBS),2 if pipeline else 1)
+                        self.assertTrue(folder.exists());self.assertIn('old',app.JOBS)
+                        self.assertEqual(len(app.JOBS),2)
                 self.assertEqual(unrelated.read_text(),'keep')
             finally:server.shutdown();server.server_close()
     def test_language_pipeline_appends_and_preserves_previous_reports(self):self.run_case(pipeline=True)
-    def test_successful_start_removes_old_reports(self):self.run_case()
+    def test_successful_start_preserves_old_reports(self):self.run_case()
     def test_invalid_start_preserves_old_reports(self):self.run_case(offline=True)
     def test_cleanup_in_progress_preserves_old_reports(self):self.run_case(busy=True)
 

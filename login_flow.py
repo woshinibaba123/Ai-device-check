@@ -7,10 +7,46 @@ PASSWORD={'账号密码登录','帐号密码登录','password login','log in wit
 NEXT={'下一步','next'}
 CHINA={'中国','中国大陆','china','china mainland','mainland china','china (cn)','中国 (cn)'}
 
-def normalized(text):return re.sub(r'\s+',' ',text.strip()).lower()
+def normalized(text):
+    # Flutter appends a tab position to the visible footer label.
+    text=re.sub(r'\s*Tab\s+\d+\s+of\s+\d+\s*$','',text.strip(),flags=re.I)
+    return re.sub(r'\s+',' ',text).lower()
 
 def matching(nodes, labels):
-    return [n for n in nodes if normalized(n['label']) in labels]
+    matches=[n for n in nodes if normalized(n['label']) in labels]
+    # Semantics scopes can expose both a button and its text child. parse_ui
+    # copies the child's label onto an unlabeled actionable parent; these are
+    # one physical control, not two equally named buttons.
+    actionable=[n for n in matches if n.get('clickable')]
+    def descendant(child,parent):
+        return bool(parent.get('path')) and child.get('path','').startswith(parent['path']+'/')
+    result=[]
+    for node in matches:
+        same=[other for other in actionable if other is not node and normalized(other['label'])==normalized(node['label'])]
+        if node.get('clickable'):
+            if any(descendant(other,node) for other in same):continue
+        elif any(descendant(node,other) or descendant(other,node) for other in same):continue
+        result.append(node)
+    return result
+
+
+def ui_confirmation(explorer,selector):
+    """UI proof only; no source observer, screenshot or input-content export."""
+    from automation import parse_ui
+    nodes=parse_ui(explorer.source())
+    if any(n['editable'] and n['secure'] for n in nodes):return None
+    if sum(n['editable'] for n in nodes)>=2 and (matching(nodes,PASSWORD) or matching(nodes,PASSWORD_MODE_SWITCH)):return None
+    by=selector.get('by','accessibility id');value=selector.get('value','').strip()
+    if by in ('accessibility id','label'):found=matching(nodes,{normalized(value)})
+    elif by=='id':found=[n for n in nodes if n['id']==value or value.startswith('flutter.') and n['id'].endswith('/'+value)]
+    elif by=='xpath':found=[n for n in nodes if n['path']==value]
+    elif by=='target':
+        import app_adapter
+        try:found=[app_adapter.resolve(nodes,value,getattr(explorer,'adapter',None))]
+        except RuntimeError:return None
+    else:raise ValueError('不支持的登录成功标识定位方式')
+    if len(found)!=1 or found[0]['editable']:return None
+    return (found[0].get('id',''),found[0]['path'],found[0]['kind'])
 
 def prepare(explorer):
     from automation import parse_ui, LoginBlocked
@@ -95,6 +131,12 @@ def agree_dialog(explorer):
 
 ONBOARDING_LABELS={'skip','agree with','同意','允许','next','got it','确定','知道了','我知道了','以后再说','关闭','close','取消','cancel','暂不','稍后','later','跳过'}
 
+def onboarding_present(nodes):
+    import popup_handler
+    labels={n['label'].strip().casefold() for n in nodes}
+    return bool(labels & popup_handler.TUTORIAL_LABELS or labels & {'skip','跳过','スキップ'} or popup_handler.privacy_update_target(nodes))
+
+
 def dismiss_onboarding(explorer):
     """登录成功后依次关闭引导轮播、隐私更新弹窗、气泡提示；绝不点击不同意/退出。"""
     from automation import parse_ui
@@ -107,6 +149,8 @@ def dismiss_onboarding(explorer):
         target,_=popup_handler.close_target(nodes)
         if target is None:target,_=popup_handler.permission_target(nodes)
         if target is None:
+            if onboarding_present(nodes):
+                quiet=0;time.sleep(.5);continue
             quiet+=1
             if quiet>=2:explorer.log('引导弹窗已清理完毕。') if taps else None
             if quiet>=2:return
@@ -114,6 +158,9 @@ def dismiss_onboarding(explorer):
         quiet=0;taps+=1
         explorer.log('关闭引导弹层：'+target['label'][:30])
         explorer.tap(target);time.sleep(1)
+    if onboarding_present(parse_ui(explorer.source())):
+        from automation import LoginBlocked
+        raise LoginBlocked('登录后的引导弹层仍未关闭，已停止后续操作，避免点击被遮挡页面。')
 
 
 PASSWORD_MODE_SWITCH={'验证码登录','验证码登陆','login by verify','verification code login'}
@@ -180,6 +227,10 @@ def ensure_password(explorer):
             explorer.log('已识别密码输入框：'+(pf['label'] or pf['kind'])+' bounds='+pf['bounds']+'；页面输入框：'+labels)
             return
         buttons=matching(nodes,PASSWORD)
+        explorer.login_diagnostics={'phase':'password_mode','editable_fields':sum(n['editable'] for n in nodes),
+            'secure_fields':sum(n['editable'] and n['secure'] for n in nodes),
+            'raw_switch_labels':sum(normalized(n['label']) in PASSWORD for n in nodes),
+            'unique_switch_controls':len(buttons),'switch_clicks':clicks}
         now=time.monotonic()
         if matching(nodes,ACCOUNT_ERRORS):
             if not buttons or clicks>=2:
@@ -189,7 +240,19 @@ def ensure_password(explorer):
                 explorer.log('账号类型查询暂时失败，等待提示消失后重试一次模式切换。')
         if len(buttons)==1 and now>=ready_at and clicks<2 and (last_click is None or now-last_click>=13):
             dismiss_keyboard(explorer)
-            explorer.tap(buttons[0]);clicks+=1;last_click=time.monotonic()
+            # Keyboard dismissal can rebuild Flutter semantics and move bounds.
+            # Resolve again and invoke the actionable element, not old coordinates.
+            fresh=parse_ui(explorer.source())
+            if password_field(fresh):return
+            current=matching(fresh,PASSWORD)
+            if len(current)!=1:
+                time.sleep(.5);continue
+            if hasattr(explorer,'find'):
+                eid=explorer.find({'by':'xpath','value':current[0]['path']})
+                explorer.call('POST',explorer.base+'/element/'+eid+'/click',{})
+            else:explorer.tap(current[0])
+            clicks+=1;last_click=time.monotonic()
+            explorer.login_diagnostics['switch_clicks']=clicks
             # A slow driver call must not consume the response window for the
             # click it just completed, nor make two real clicks occur back-to-back.
             deadline=max(deadline,last_click+15)
@@ -199,7 +262,8 @@ def ensure_password(explorer):
             explorer.log('当前登录页：'+state+'，可识别输入框 '+str(sum(n['editable'] for n in nodes))+' 个。')
             last_state=state
         time.sleep(.5)
-    raise LoginBlocked('45 秒内仍未识别密码输入框；已收起键盘并最多尝试两次切换，未填密码、未发送验证码或登录请求。')
+    detail=getattr(explorer,'login_diagnostics',{})
+    raise LoginBlocked('45 秒内仍未识别密码输入框；模式切换控件 '+str(detail.get('unique_switch_controls',0))+' 个，实际切换 '+str(clicks)+' 次；未填密码、未发送验证码或登录请求。')
 
 
 def fill_account(explorer, account, selector=None):
@@ -208,7 +272,17 @@ def fill_account(explorer, account, selector=None):
     selector=selector or {}
     def locate():
         if selector.get('value','').strip():
-            return explorer.find(selector), None
+            # A generated XPath still refers to an input node. Preserve its role
+            # and bounds so Android uses targeted native replacement, not the
+            # generic set-value path that can lose Flutter text on focus changes.
+            node=None
+            raw=explorer.source()
+            if isinstance(raw,str):
+                fields=[n for n in parse_ui(raw) if n['editable'] and not n['secure']]
+                by=selector.get('by','accessibility id');value=selector['value']
+                candidates=[n for n in fields if n.get('path')==value] if by=='xpath' else [n for n in fields if n.get('id')==value] if by=='id' else [n for n in fields if n.get('label')==value]
+                if len(candidates)==1:node=candidates[0]
+            return explorer.find(selector), node
         fields=[n for n in parse_ui(explorer.source()) if n['editable'] and not n['secure']]
         if not fields:return None,None
         return explorer.find({'by':'xpath','value':fields[0]['path']}), fields[0]

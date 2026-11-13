@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "module": "App · 门店与设备",
+  "flows": [
+    {
+      "id": "store-search",
+      "name": "门店搜索与进入",
+      "platforms": [
+        "App"
+      ],
+      "parameters": [
+        {
+          "key": "store",
+          "label": "门店名称",
+          "default": "塘人｜创意本帮菜(奥特莱斯店)"
+        }
+      ],
+      "sources": [
+        "app:lib/widgets/store/content/store_search_content.dart"
+      ],
+      "steps": [
+        "进入门店列表，搜索并进入「{{store}}」，按用户策略选择第一张搜索结果并记录实际门店名称。",
+        "若出现新手引导，识别后点击 skip/跳过；没有引导直接继续。",
+        "核对进入后的门店设备列表，记录实际名称和设备数量。"
+      ],
+      "status": "source_candidate",
+      "readonly": true
+    },
+    {
+      "id": "clean-robot",
+      "name": "清洁机器人 · 地图与清洁记录",
+      "parameters": [
+        {
+          "key": "store",
+          "label": "门店名称",
+          "default": "塘人｜创意本帮菜(奥特莱斯店)"
+        },
+        {
+          "key": "robot",
+          "label": "机器人标识",
+          "default": "C4:3C:B0:AA:F9:CF"
+        }
+      ],
+      "sources": [
+        "app:lib/widgets/store/store_main_page.dart",
+        "h5:src/pages/mapPreview/MapPreview.vue",
+        "h5:src/pages/cleanTaskReport/cleanTaskReport.vue"
+      ],
+      "steps": [
+        "进入门店列表，搜索并进入「{{store}}」，按用户策略选择第一张搜索结果并记录实际门店名称。",
+        "仅在出现引导时跳过。",
+        "在设备列表查找 {{robot}}，忽略标识大小写；未看到则向下滚动，页面不变或达到上限时停止。",
+        "核对设备标识和 Cleaning Area/清洁面积；不选择只有 Mission Mileage/Number of Tasks 的设备。",
+        "进入该设备详情，查看地图，记录加载及异常状态。",
+        "查看清洁记录，记录列表或空状态；若有记录，进入第一条详情查看后返回。",
+        "返回当前门店机器人列表并核对。"
+      ],
+      "status": "source_candidate",
+      "platforms": [
+        "App",
+        "H5"
+      ],
+      "readonly": true
+    }
+  ]
+}

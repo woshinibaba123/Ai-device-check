@@ -35,6 +35,21 @@ def instrument(project):
     file.write_text("import 'dart:io';\n"+head+'  /// 医疗账号登录后校验'+tail)
     return name
 
+def verify_apk_probe(artifact, name):
+    """Reject a cached APK whose Dart kernel does not contain its login marker."""
+    import zipfile
+    if not re.fullmatch(r'devicecheck-login-[a-f0-9]{32}\.json',name or ''):
+        raise ValueError('无效登录验证文件')
+    try:
+        with zipfile.ZipFile(artifact) as archive:
+            kernel=archive.read('assets/flutter_assets/kernel_blob.bin')
+    except (OSError,KeyError,zipfile.BadZipFile):
+        raise ValueError('缓存测试包不是可验证的 Flutter debug APK，请重新从源码构建') from None
+    if name.encode() not in kernel:
+        raise ValueError('缓存测试包与登录观察器不一致，请重新从源码构建；未开始测试')
+    return True
+
+
 class Probe:
     def __init__(self, platform, device, bundle, name, command, adb=None):
         if not re.fullmatch(r'devicecheck-login-[a-f0-9]{32}\.json',name):raise ValueError('无效登录验证文件')

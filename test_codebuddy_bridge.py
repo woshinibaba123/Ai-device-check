@@ -47,6 +47,55 @@ class GenerationSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):bridge.generation_snapshot('missing')
 
 
+class StreamResponseTests(unittest.TestCase):
+    def test_verbose_transport_is_not_counted_as_answer_size(self):
+        import cancellation
+        events=[]
+        output=json.dumps({'type':'system','metadata':'x'*4_100_000})+'\n'+json.dumps({'type':'result','result':'OK'})+'\n'
+        def run(*args,**kwargs):
+            kwargs['on_stdout'](output)
+            return SimpleNamespace(returncode=0,stdout=output,stderr='')
+        with patch.object(bridge,'_KEY','test-stream-secret'),patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(cancellation.Control,'run',side_effect=run):
+            result=bridge.ask('ping',progress=lambda *e:events.append(e))
+        self.assertEqual(result,'OK')
+        self.assertTrue(any(stage=='call_stats' and '2 个事件' in text for stage,text in events))
+        self.assertNotIn('metadata',json.dumps(events))
+    def test_incomplete_transport_reports_bytes_without_inventing_reply(self):
+        stats=[];values=[];stream=bridge.StreamResponse(values.append,lambda *args:stats.append(args))
+        stream.feed('{"type":')
+        self.assertEqual(stats,[(8,0,0)])
+        self.assertEqual(values,[])
+    def test_reply_body_still_has_independent_limit(self):
+        stream=bridge.StreamResponse(lambda text:None)
+        with self.assertRaisesRegex(ValueError,'回复正文'):
+            stream.feed(json.dumps({'type':'stream_event','event':{'delta':{'type':'text_delta','text':'x'*1_000_001}}})+'\n')
+    def test_partial_records_are_delivered_once_and_thinking_is_excluded(self):
+        values=[];stream=bridge.StreamResponse(values.append)
+        records=[{'type':'stream_event','event':{'delta':{'type':'thinking_delta','thinking':'private'}}},
+                 {'type':'stream_event','event':{'delta':{'type':'text_delta','text':'你好'}}},
+                 {'type':'stream_event','event':{'delta':{'type':'text_delta','text':'世界'}}},
+                 {'type':'result','result':'你好世界'}]
+        output='\n'.join(json.dumps(r,ensure_ascii=False) for r in records)+'\n'
+        for end in range(1,len(output)+1):stream.feed(output[:end])
+        self.assertEqual(values,['你好','你好世界'])
+        self.assertEqual(stream.result,records[-1])
+    def test_streamed_key_is_redacted_and_terminal_result_is_used(self):
+        import cancellation
+        events=[]
+        output='\n'.join(json.dumps(r) for r in [
+            {'type':'stream_event','event':{'delta':{'type':'text_delta','text':'answer test-stream-secret'}}},
+            {'type':'result','result':'answer test-stream-secret'}])+'\n'
+        def run(*args,**kwargs):
+            kwargs['on_stdout'](output)
+            return SimpleNamespace(returncode=0,stdout=output,stderr='')
+        with patch.object(bridge,'_KEY','test-stream-secret'),patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(cancellation.Control,'run',side_effect=run):
+            result=bridge.ask('ping',progress=lambda *e:events.append(e))
+        self.assertNotIn('test-stream-secret',json.dumps(events))
+        self.assertEqual(result,'answer [已隐藏]')
+        self.assertTrue(any(stage=='stream' for stage,label in events))
+        self.assertEqual(events[-1][0],'call_done')
+
+
 class BridgeTests(unittest.TestCase):
     def setUp(self):
         self.saved_key=''
@@ -124,6 +173,20 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn('test-private-key',json.dumps(bridge.status()))
             self.assertFalse(Path(options['cwd']).exists())
 
+    def test_ui_fast_profile_is_opt_in_and_keeps_tools_disabled(self):
+        import cancellation
+        bridge.configure({'key':'test-key'})
+        response=SimpleNamespace(returncode=0,stdout=json.dumps({'result':'OK'}),stderr='')
+        with patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(cancellation.Control,'run',return_value=response) as run:
+            bridge.ask('page decision',ui_fast=True)
+            args=run.call_args.args[0]
+            self.assertEqual(args[args.index('--effort')+1],'low')
+            self.assertIn('--system-prompt',args)
+            self.assertEqual(args[args.index('--tools')+1],'')
+            bridge.ask('ordinary generation')
+            self.assertNotIn('--effort',run.call_args.args[0])
+            self.assertNotIn('--system-prompt',run.call_args.args[0])
+
     def test_vendor_error_output_never_echoed(self):
         bridge.configure({'key':'test-secret'})
         process=MagicMock(returncode=1);process.communicate.return_value=('','failed with test-secret')
@@ -131,12 +194,18 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:bridge.ask('ping')
             self.assertNotIn('test-secret',str(caught.exception))
 
-    def test_timeout_kills_process_group(self):
+    def test_timeout_releases_ai_lock(self):
+        import cancellation
         bridge.configure({'key':'test-secret'})
-        process=MagicMock(pid=1234);process.communicate.side_effect=[bridge.subprocess.TimeoutExpired('codebuddy',180),('','')]
-        with patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(bridge.subprocess,'Popen',return_value=process),patch.object(bridge.os,'killpg') as kill:
-            with self.assertRaisesRegex(ValueError,'180'):bridge.ask('ping')
-            kill.assert_called_once_with(1234,bridge.signal.SIGKILL)
+        with patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(cancellation.Control,'run',side_effect=bridge.subprocess.TimeoutExpired('codebuddy',180)):
+            with self.assertRaisesRegex(ValueError,'超时'):bridge.ask('ping')
+            self.assertFalse(bridge.BUSY.locked())
+
+    def test_cancelled_model_releases_ai_lock(self):
+        import cancellation
+        bridge.configure({'key':'test-secret'})
+        with patch.object(bridge,'executable',return_value='/mock/codebuddy'),patch.object(cancellation.Control,'run',side_effect=cancellation.Cancelled('stopped')):
+            with self.assertRaises(cancellation.Cancelled):bridge.ask('ping',stopped=lambda:True)
             self.assertFalse(bridge.BUSY.locked())
 
     def test_generation_does_not_read_source_without_opt_in(self):
@@ -199,6 +268,17 @@ class HTTPTests(unittest.TestCase):
         with patch.object(bridge,'configure') as configure:
             with self.assertRaises(urllib.error.HTTPError) as error:self.post('/api/ai/config',{'key':'secret'},'https://example.com')
             self.assertEqual(error.exception.code,403);configure.assert_not_called()
+
+    def test_live_ai_mode_queues_loop_without_excel_or_generated_plan(self):
+        worker=MagicMock()
+        live={'goal':'打开消息','checkpoints':['消息'],'share_page':True,'max_actions':3,'seconds':60}
+        with tempfile.TemporaryDirectory() as folder,patch.object(app,'ROOT',Path(folder)),patch.object(app,'JOBS',{}),patch.object(app,'BATCH_RUNNING',threading.Event()),patch.object(app,'request',return_value={}),patch.object(app,'threading',SimpleNamespace(Thread=worker)),patch.object(bridge,'status',return_value={'busy':False}):
+            response=json.load(self.post('/api/batch',{'test_mode':'ai_live','ai_live':live,'bundle':'com.example.app','targets':[{'platform':'Android','device':'mock-device'}]}))
+            self.assertEqual(response['count'],1)
+            cfg=worker.call_args.kwargs['args'][0][0][1]
+            self.assertEqual(cfg['test_mode'],'ai_live')
+            self.assertEqual(cfg['ai_live']['goal'],'打开消息')
+            self.assertNotIn('case_book',cfg)
 
 
 if __name__=='__main__':unittest.main()

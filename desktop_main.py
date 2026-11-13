@@ -19,7 +19,7 @@ def data_directory():
 def prepare():
     root=data_directory();root.mkdir(parents=True,exist_ok=True)
     resources=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-    for name in ('index.html','catalog.json','model_credit_reference.json'):
+    for name in ('index.html','parsed_cases.js','catalog.json','model_credit_reference.json'):
         source=resources/name
         if source.resolve()!=(root/name).resolve():shutil.copy2(source,root/name)
     os.environ['DEVICECHECK_DATA_DIR']=str(root)

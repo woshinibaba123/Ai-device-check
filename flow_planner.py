@@ -1,8 +1,14 @@
 """Evidence-bearing workflow drafts from workbook context and Flutter source."""
 import json
 import re
+import posixpath
 from pathlib import Path
 import source_navigation
+import stable_identifiers
+
+
+class EvidenceBudgetExceeded(ValueError):
+    """Source selection must be narrowed before any model request."""
 
 KNOWN_ENTRIES={
     'myCurrency':['我的','通用设置'],'myAbout':['我的','关于'],
@@ -33,6 +39,16 @@ def source_index(project):
     if not (project/'pubspec.yaml').is_file():raise ValueError('流程分析需要 Flutter 项目根目录')
     navigation=source_navigation.analyze(project)
     files={str(f.relative_to(project)):without_comments(f.read_text(errors='replace')) for f in (project/'lib').rglob('*.dart')}
+    identifiers=stable_identifiers.registry(project)
+    class_sources={name:file for file,text in files.items() for name in re.findall(r'\bclass\s+(\w+)',text)}
+    package=re.search(r'^name:\s*(\w+)',(project/'pubspec.yaml').read_text(),re.M)
+    package=package[1] if package else 'app_phone'
+    def imports(file):
+        for link in re.findall(r"import\s+['\"]([^'\"]+)['\"]",files.get(file,'')):
+            if link.startswith('package:'+package+'/'):target='lib/'+link.split('/',1)[1]
+            elif not re.match(r'\w+:',link):target=posixpath.normpath(posixpath.join(posixpath.dirname(file),link))
+            else:continue
+            if target in files:yield target
     translations={};locale_packs={}
     languages=['zh','en']+sorted(p.stem for p in (project/'assets/i18n').glob('*.json') if p.stem not in ('zh','en'))
     for lang in languages:
@@ -60,31 +76,39 @@ def source_index(project):
         source=next((f for f,t in files.items() if re.search(r'\bclass\s+'+re.escape(route['page'])+r'\b',t)),None) if route['page'] else None
         if not source:continue
         text=files[source];related={source:text}
-        # Inspect page-local controllers and repositories; avoid walking the app globally.
-        for link in re.findall(r"import\s+['\"]package:app_phone/(lib/)?([^'\"]+)['\"]",text):
-            target='lib/'+link[1]
-            if target in files and any(x in target for x in ('controller','repository')):related[target]=files[target]
+        # Relative imports and extracted child widgets/controllers carry page evidence.
+        frontier=[source]
+        for _ in range(3):
+            following=[]
+            for file in frontier:
+                for target in imports(file):
+                    local=posixpath.dirname(target)==posixpath.dirname(source)
+                    if target not in related and len(related)<30 and (local or 'controller' in target or '/repository/' in target):
+                        related[target]=files[target];following.append(target)
+            frontier=following
         imported='\n'.join(related.values())
         repositories=set(re.findall(r"http/repository/(\w+)\.dart",imported))
         candidates=[c for c in calls if c['repository'] in repositories and c['method'] and re.search(r'\.'+re.escape(c['method'])+r'\s*\(',imported) and c['path']]
         fields=[]
-        for m in re.finditer(r'\b(?:TextField|TextFormField|InputWidget|InputTextWidget|NumberControllerWidget)\s*\(',text):
+        for m in re.finditer(r'\b(?:TextField|TextFormField|InputWidget|InputTextWidget|InputTxtWidget|NumberControllerWidget|_buildInputField|_buildPickerField|_selectionField)\s*\(',text):
             snippet=call_body(text,m.end()-1)
-            fields.append({'widget':m[0].split('(')[0].strip(),'labels':labels(snippet)[:5],'source':source,'line':text.count('\n',0,m.start())+1,'requires_runtime_binding':True})
+            # Helper declarations are not input instances.
+            if re.match(r'\s*\{',snippet):continue
+            fields.append({'widget':m[0].split('(')[0].strip(),'labels':labels(snippet)[:5],'source':source,'line':text.count('\n',0,m.start())+1,'secure':bool(re.search(r'(?:isPass|obscure|obscureText):\s*true',snippet)),'requires_runtime_binding':True})
         blocked_back=bool(re.search(r'canPop:\s*false|onWillPop:',text))
         bar=re.search(r'appBar:\s*StyledWidgets\.backTransAppBar\s*\(',text)
         bar_body=call_body(text,bar.end()-1) if bar else ''
         saves_on_back=bool(re.search(r'onPressed:\s*\(\)\s*=>\s*(?:update|save|submit)\w*\(',bar_body,re.I))
         title_keys=re.findall(r"\btitle:\s*['\"]([^'\"]+)['\"]\.tr",text)
-        pages.append({**route,'source':source,'labels':labels(text),'title_labels':[v for key in title_keys for v in translations.get(key,[key])],'inputs':fields,'api_candidates':candidates,'entry_path':KNOWN_ENTRIES.get(route['name'],[]),'entry_status':'source_candidate_requires_runtime_confirmation','return':{'action':'back','intercepted':blocked_back,'may_save':saves_on_back,'source':source},'save_controls':[v for v in labels(text) if any(re.search(r'保存|提交|save|submit',label,re.I) for label in v['labels'])]})
+        device_calls=[{'manager':m[1],'method':m[2],'source':source,'line':text.count('\n',0,m.start())+1,'status':'requires_device_adapter_not_http_save'} for m in re.finditer(r'\b(ApnLanManager)\.ins\(\)\s*\.\s*(\w+)\s*\(',text)]
+        pages.append({**route,'source':source,'labels':labels(text),'title_labels':[v for key in title_keys for v in translations.get(key,[key])],'inputs':fields,'api_candidates':candidates,'device_operations':device_calls,'entry_path':KNOWN_ENTRIES.get(route['name'],[]),'entry_status':'source_candidate_requires_runtime_confirmation','return':{'action':'back','intercepted':blocked_back,'may_save':saves_on_back,'source':source},'save_controls':[v for v in labels(text) if any(re.search(r'保存|提交|save|submit',label,re.I) for label in v['labels'])]})
     ownership={}
     for page in pages:
         seen={page['source']};frontier=[page['source']]
         for _ in range(2):
             new=[]
             for file in frontier:
-                for target in re.findall(r"import\s+['\"]package:app_phone/([^'\"]+)['\"]",files.get(file,'')):
-                    target='lib/'+target
+                for target in imports(file):
                     if target in files and '/widgets/' in target and target not in seen:seen.add(target);new.append(target)
             frontier=new
         ownership[page['path']]=seen
@@ -97,7 +121,8 @@ def source_index(project):
             active_lines=files.get(edge['source'],'').splitlines()
             if edge['line']>len(active_lines) or not re.search(r'Get\.(?:toNamed|offNamed|offAllNamed)\(',active_lines[edge['line']-1]):continue
             target=by_route.get(edge['route'])
-            choices=[label for label in edge['labels'] if re.search(r'[\u4e00-\u9fff]',label)]
+            chinese=locale_packs.get('zh',{})
+            choices=[chinese[key] for key in edge.get('label_keys',[]) if isinstance(chinese.get(key),str)] or [label for label in edge['labels'] if re.search(r'[\u4e00-\u9fff]',label)]
             if not target or not choices or target['entry_candidates']:continue
             label=choices[0]
             for parent in pages:
@@ -132,6 +157,8 @@ def source_index(project):
         if not match or key not in translations:continue
         pages.append({'name':constant,'path':'/webview','page':'WebViewPage / '+constant,'kind':'h5_entry','source':file,'labels':[{'key':key,'labels':list(dict.fromkeys(terms+translations[key]))}],'title_labels':terms,'inputs':[],'api_candidates':[],'entry_path':entry,'entry_candidates':[{'steps':entry,'evidence':[{'source':file,'line':files[file].count('\n',0,match.start())+1,'call':'WebUtil.webLoadByPage(PageConst.'+constant+')'}],'status':'source_h5_entry_candidate'}],'entry_status':'h5_internal_controls_require_runtime_inspection','return':web_return,'save_controls':[]})
     success=re.search(r'static\s+const\s+int\s+success\s*=\s*(\d+)',files.get('lib/http/http_exception.dart',''))
+    for page in pages:
+        page['automation_targets']=stable_identifiers.flutter_targets(page['source'],identifiers,class_sources)
     codes=[int(success[1])] if success else []
     if re.search(r'resultModel\.code\s*==\s*0',files.get('lib/http/dio_util.dart','')):codes.append(0)
     return {'project':str(project),'pages':pages,'api_calls':calls,'translations':translations,'locale_packs':locale_packs,'navigation':navigation,'business_success_codes':codes,'coverage_note':'源码静态关联是候选路径，实际控件、角色和接口调用必须在运行时确认。'}
@@ -226,7 +253,12 @@ def ai_summary(index,outline,max_chars=30000,language=None):
     """Keep relevant control labels and navigation; never cut JSON mid-object."""
     routes=index.get('navigation',{}).get('routes',[])
     paths={r['name']:r['path'] for r in routes}
-    requested=set(re.findall(r'/[A-Za-z0-9_/-]+',outline))
+    requested=set(re.findall(r'/[A-Za-z0-9_/-]+',outline));explicit=requested.copy()
+    if re.search(r'首次启动|登录前|启动App|启动应用',outline,re.I):requested.add('/loginConfig')
+    if re.search(r'账号密码登录|输入[^。\n]{0,20}账号|登录页',outline):requested.add('/login')
+    if re.search(r'我的[^。\n]{0,40}语言|通用设置[^。\n]{0,20}语言',outline):requested.update(('/language','/my/currency'))
+    auth_focus=any(path.lower().startswith('/login') for path in requested) or bool(re.search(r'首次启动|登录前|登录页|账号密码登录|输入[^。\n]{0,20}(?:账号|密码)',outline))
+    if '我的' in outline and any(p.get('path')=='/main' for p in index['pages']):requested.add('/main')
     def local_labels(value):
         if isinstance(value,list):return [local_labels(v) for v in value]
         if not isinstance(value,dict):return value
@@ -240,15 +272,19 @@ def ai_summary(index,outline,max_chars=30000,language=None):
         value=sum(3 for s in labels if len(s)>1 and s.casefold() in outline.casefold())
         if page.get('kind')=='h5_entry' and value:value+=500
         if page.get('path') in requested:value+=10000
+        if page.get('path') in explicit:value+=20000
         if page.get('name') and re.search(r'\b'+re.escape(page['name'])+r'\b',outline,re.I):value+=100
-        if '登录' in outline and page.get('path','').lower().startswith('/login'):value+=1000
-        if page.get('path')=='/loginConfig' and re.search(r'登录前|配置页|国家或区域|国家或地区|数据中心选择',outline):value+=5000
-        if page.get('path')=='/login' and re.search(r'登录页|账号|密码|协议',outline):value+=4000
+        if auth_focus and '登录' in outline and page.get('path','').lower().startswith('/login'):value+=1000
+        if auth_focus and page.get('path')=='/loginConfig' and re.search(r'登录前|配置页|国家或区域|国家或地区|数据中心选择',outline):value+=5000
+        if auth_focus and page.get('path')=='/login' and re.search(r'登录页|账号|密码|协议',outline):value+=4000
         return value
     details=[]
     project=Path(index['project']).resolve()
     for page in sorted(index['pages'],key=score,reverse=True)[:20]:
-        item={k:page.get(k) for k in ('name','path','source','kind','entry_status','title_labels','labels','entry_path','entry_candidates','inputs','api_candidates','return','save_controls')}
+        item={k:page.get(k) for k in ('name','path','source','kind','entry_status','title_labels','labels','entry_path','entry_candidates','inputs','api_candidates','device_operations','return','save_controls')}
+        # Keep the most useful identities (inputs first) without crowding the
+        # other requested pages out of a multi-page evidence summary.
+        if page.get('automation_targets'):item['automation_targets']=page['automation_targets'][:2]
         source=project/str(page.get('source',''))
         text=without_comments(source.read_text(errors='replace')) if source.is_file() and project in source.resolve().parents else ''
         item['local_state_evidence']={
@@ -270,20 +306,37 @@ def ai_summary(index,outline,max_chars=30000,language=None):
             item['local_state_evidence']['language_options']=[{'name':n,'locale':lang+'_'+country} for n,lang,country in re.findall(r"Language\('([^']+)',\s*'([^']+)',\s*'([^']+)'\)",cache_text)]
             item['local_state_evidence']['country_CN_labels']=list(dict.fromkeys(re.findall(r'"CN":\s*"([^"\n]+)"',country_file.read_text()))) if country_file.is_file() else []
             item['local_state_evidence']['options_note']='选项名称来自该页面依赖的管理器和本地字典；是否对当前环境可用在设备上唯一匹配验证，不代表云端一定返回。'
+        if page.get('path')=='/language' and 'DataCache.getAvailableLanguageList' in text:
+            cache_file=project/'lib/utils/data_cache.dart'
+            cache_text=cache_file.read_text() if cache_file.is_file() else ''
+            item['local_state_evidence']['language_options']=[{'name':n,'locale':lang+'_'+country} for n,lang,country in re.findall(r"Language\('([^']+)',\s*'([^']+)',\s*'([^']+)'\)",cache_text)]
+            item['local_state_evidence']['availability']='语言项由CloudLanguageService.availableLanguageCodes过滤；准确选项名称是候选，当前云端是否开放必须运行时核对。'
         details.append(item)
     details=[local_labels(p) for p in details]
     selected_paths={p['path'] for p in details}
     edges=[{k:e.get(k) for k in ('route','labels','source','line')} for e in index.get('navigation',{}).get('entries',[]) if e.get('route') in selected_paths][:40]
     while edges and len(json.dumps(edges,ensure_ascii=False))>max_chars//5:edges.pop()
-    result={'pages':details,'navigation_entries':edges,'route_overview':[{k:p.get(k) for k in ('name','path','source')} for p in index['pages']],
+    result={'pages':details,'navigation_entries':edges,'business_success_codes':index.get('business_success_codes',[]),'route_overview':[{k:p.get(k) for k in ('name','path','source')} for p in index['pages']],
             'note':'登录前配置与登录后我的/数据中心是不同页面；源码准确文字可用于候选定位，运行时验证唯一性。'}
     # Remove broad indexes before the very controls that the current cases need.
     if len(json.dumps(result,ensure_ascii=False))>max_chars:result['route_overview']=[]
     if len(json.dumps(result,ensure_ascii=False))>max_chars:result['navigation_entries']=[]
-    while len(json.dumps(result,ensure_ascii=False))>max_chars and len(details)>1:details.pop()
-    if len(json.dumps(result,ensure_ascii=False))>max_chars and details:
-        # Keep the highest-ranked page and its labels/inputs even for a large API list.
-        details[0]['api_candidates']=[]
-        details[0]['entry_candidates']=[]
-    if len(json.dumps(result,ensure_ascii=False))>max_chars:raise ValueError('当前页面证据超过摘要大小，请缩小用例范围；未发送缺失控件的空摘要')
+    # Give every explicitly requested route its evidence before optional pages.
+    # Never silently remove APIs/navigation: that turns budget pressure into a
+    # false "source has no evidence" result.
+    ordered=details[:];details.clear()
+    for item in ordered:
+        details.append(item)
+        if len(json.dumps(result,ensure_ascii=False))<=max_chars:continue
+        details.pop()
+        if item.get('path') in requested or not details:
+            compact=dict(item)
+            needed={v.get('key') for field in item.get('inputs') or [] for v in field.get('labels',[])}
+            compact['labels']=[label for label in item.get('labels') or [] if label.get('key') in needed or any(s in outline for s in label.get('labels',[]))]
+            details.append(compact)
+            if len(json.dumps(result,ensure_ascii=False))>max_chars:
+                if item.get('path') in requested:raise EvidenceBudgetExceeded('目标页面入口、字段与接口证据超过摘要大小，请逐条匹配；未丢弃关键证据')
+                details.pop()
+    if not details and ordered:details.append(ordered[0])
+    if len(json.dumps(result,ensure_ascii=False))>max_chars:raise EvidenceBudgetExceeded('当前页面证据超过摘要大小，请缩小用例范围；未发送缺失控件的空摘要')
     return result

@@ -257,8 +257,36 @@ TUTORIAL_LABELS = frozenset({
 
 def tutorial_target(nodes):
     if not any(n["label"].strip().casefold() in TUTORIAL_LABELS for n in nodes):return None
-    buttons=[n for n in nodes if n["clickable"] and n["label"].strip().casefold() in {"next","i know","下一步","知道了","我知道了","got it"}]
-    return buttons[0] if len(buttons)==1 else None
+    # 引导层同时出现「跳过」和「下一步」时优先跳过，最快脱离遮挡。
+    skip=[n for n in nodes if n["clickable"] and n["label"].strip().casefold() in {'skip','跳过','スキップ'}]
+    if skip:return skip[0]
+    advance=[n for n in nodes if n["clickable"] and n["label"].strip().casefold() in {"next","i know","下一步","知道了","我知道了","got it"}]
+    return advance[-1] if advance else None
+
+
+# 引导浮层的典型按钮组合：跳过（或 skip）与下一步/知道了并存。
+# 无论哪个页面出现，都视为遮挡引导，第一时间跳过。
+GUIDE_SKIP={'skip','跳过','スキップ'}
+
+def guide_pair_target(nodes):
+    skippable=[n for n in nodes if n['clickable'] and not n['editable'] and n['label'].strip().casefold() in GUIDE_SKIP]
+    if not skippable:return None
+    if not any(n['clickable'] and n['label'].strip().casefold() in GUIDE_ADVANCE for n in nodes):return None
+    return skippable[0]
+
+
+def dismiss_target(nodes):
+    """遮挡类浮层（系统权限、新手引导、跳过+下一步引导）的即时关闭目标。
+
+    只覆盖无争议的遮挡场景，不包含业务确认弹窗（取消/确定等留给上层流程决策）。
+    """
+    popup,reason=permission_target(nodes)
+    if popup is not None:return popup,reason
+    tutorial=tutorial_target(nodes)
+    if tutorial is not None:return tutorial,'新手引导遮挡，立即关闭'
+    guide=guide_pair_target(nodes)
+    if guide is not None:return guide,'引导浮层遮挡（跳过+下一步并存），立即跳过'
+    return None,''
 
 
 # Guide overlays without a whitelisted coachmark still show a pager pair

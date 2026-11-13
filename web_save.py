@@ -27,6 +27,26 @@ return true;
 '''
 
 
+CHECKED_DOM_CLICK=r'''
+const original=arguments[0];
+const e=original?.closest?.('button,[role=button]')||original;
+if(!e||!e.isConnected||e.disabled||e.getAttribute('aria-disabled')==='true')throw Error('提交控件不可用，未点击');
+if(!e.getClientRects().length||getComputedStyle(e).visibility==='hidden'||getComputedStyle(e).display==='none')throw Error('提交控件不可见，未点击');
+e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
+const r=e.getBoundingClientRect();
+const left=Math.max(0,r.left),right=Math.min(innerWidth,r.left+r.width);
+const top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.top+r.height);
+if(right<=left||bottom<=top)throw Error('提交控件在可见区域之外，未点击');
+let clear=false;
+for(const fx of [.5,.25,.75])for(const fy of [.5,.25,.75]){
+ const hit=document.elementFromPoint(left+(right-left)*fx,top+(bottom-top)*fy);
+ if(hit&&(hit===e||e.contains(hit)))clear=true;
+}
+if(!clear)throw Error('提交控件被其他元素遮挡，未点击');
+e.click();return true;
+'''
+
+
 def perform(web,step,element_id):
     # Repeat validation at the mutation boundary even when called outside case_runner.
     import case_runner
@@ -38,7 +58,13 @@ def perform(web,step,element_id):
     try:
         if web.e.stopped():raise RuntimeError('用户停止，未点击保存')
         # Exactly once: never retry an uncertain save click.
-        web.e.call('POST',web.e.base+'/element/'+element_id+'/click',{})
+        mode=step.get('click_mode','webdriver')
+        if mode=='dom_checked':
+            import automation
+            if web.js(CHECKED_DOM_CLICK,[{automation.ELEMENT:element_id}]) is not True:
+                raise RuntimeError('提交点击结果不确定；需核对记录，不能自动重提')
+        else:
+            web.e.call('POST',web.e.base+'/element/'+element_id+'/click',{})
         deadline=time.monotonic()+float(api.get('timeout',20))
         while time.monotonic()<deadline:
             if web.e.stopped():raise RuntimeError('保存已点击但测试停止；需核对记录，不能自动重提')
@@ -49,7 +75,7 @@ def perform(web,step,element_id):
                 if event.get('code') not in api.get('codes',[610000,0]):raise AssertionError('H5 保存接口业务失败或缺少成功码：'+str(event.get('code')))
                 for field,value in api.get('equals',{}).items():
                     if event.get('fields',{}).get(field)!=value:raise AssertionError('H5 保存响应字段与预期不一致：'+field)
-                return {'action':'web_save','selector':step['value'],'api':{'method':api['method'],'path':api['path'],'http_status':event['status'],'code':event['code'],'fields':event.get('fields',{})},'clicked_once':True}
+                return {'action':'web_save','selector':step['value'],'api':{'method':api['method'],'path':api['path'],'http_status':event['status'],'code':event['code'],'fields':event.get('fields',{})},'clicked_once':True,'click_mode':mode}
             time.sleep(.25)
         raise RuntimeError('H5 保存已点击但接口结果未确认；不能自动重提，需核对后台记录')
     finally:

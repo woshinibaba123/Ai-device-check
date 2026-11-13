@@ -1,5 +1,6 @@
 """Bounded native UI exploration. Credentials are never added to report structures."""
 import hashlib
+import stable_identifiers
 import popup_handler
 import login_flow
 import language_tests
@@ -49,7 +50,7 @@ def parse_ui(source, include_disabled=False):
         visible = a.get('displayed', a.get('visible','true')) != 'false'
         clickable = a.get('clickable')=='true' or kind in ('XCUIElementTypeButton','XCUIElementTypeCell','XCUIElementTypeLink','XCUIElementTypeSwitch','XCUIElementTypeTab')
         if visible and (include_disabled or a.get('enabled','true')!='false'):
-            nodes.append({'path':path,'enabled':a.get('enabled','true')!='false','kind':kind,'label':label,'hint':a.get('hint',''),'id':a.get('resource-id',''),'editable':editable,'secure':secure,'clickable':clickable,'scrollable':a.get('scrollable')=='true' or kind in ('XCUIElementTypeScrollView','XCUIElementTypeTable','XCUIElementTypeCollectionView'),'package':a.get('package',''),'bounds':a.get('bounds',''),'value':a.get('value',''),'checked':a.get('checked')=='true' or a.get('value')=='1','selected':a.get('selected')=='true' or a.get('isSelected')=='true'})
+            nodes.append({'path':path,'enabled':a.get('enabled','true')!='false','kind':kind,'label':label,'hint':a.get('hint',''),'id':stable_identifiers.native_id(a),'editable':editable,'secure':secure,'clickable':clickable,'scrollable':a.get('scrollable')=='true' or kind in ('XCUIElementTypeScrollView','XCUIElementTypeTable','XCUIElementTypeCollectionView'),'package':a.get('package',''),'bounds':a.get('bounds',''),'value':a.get('value',''),'checked':a.get('checked')=='true' or a.get('value')=='1','selected':a.get('selected')=='true' or a.get('isSelected')=='true'})
         counts = {}
         for child in el:
             counts[child.tag]=counts.get(child.tag,0)+1
@@ -130,11 +131,40 @@ class Explorer:
         self.call=call;self.sid=sid;self.platform=platform;self.log=log;self.capture=capture;self.stopped=stopped;self.secrets=secrets;self.shell=shell
         self.base='/session/'+sid
 
+    def native_context(self):
+        active=getattr(self,'_active_webview_context',None)
+        if isinstance(active,tuple):
+            self.call('POST',self.base+'/context',{'name':'NATIVE_APP'})
+            self._active_webview_context=None
+
     def source(self):
+        probe=getattr(self,'native_health_probe',None)
+        if self.platform=='Android' and getattr(self,'visual_source_fallback',False) and callable(probe) and time.monotonic()>=getattr(self,'_health_check_after',0):
+            self._health_check_after=time.monotonic()+5
+            if probe():
+                self._source_cooldown_until=time.monotonic()+60
+                self.log('控件树诊断：UiAutomator2 连续两次处于 D 状态，跳过 /source，直接转视觉观察；未重放操作。')
+                raise TimeoutError('UiAutomator2 设备端进程持续 D 状态，跳过控件树读取')
+        self.native_context()
+        if time.monotonic()<getattr(self,'_source_cooldown_until',0):
+            self.log('控件树诊断：跳过 /source，冷却剩余 %.1fs'%(self._source_cooldown_until-time.monotonic()))
+            raise TimeoutError('原生控件树通道冷却中：上次读取失败，暂不重复请求 /source')
         for attempt in range(3):
-            try:return self.call('GET',self.base+'/source')
-            except RuntimeError as error:
-                if self.platform!='Android' or 'AccessibilityNodeInfo' not in str(error):raise
+            read_started=time.monotonic()
+            self.log('控件树诊断：开始读取 attempt=%d platform=%s visual_fallback=%s'%(attempt+1,self.platform,bool(getattr(self,'visual_source_fallback',False))))
+            try:
+                value=self.call('GET',self.base+'/source')
+                self.log('控件树诊断：读取成功 耗时=%.2fs 字符数=%d'%(time.monotonic()-read_started,len(value) if isinstance(value,str) else 0))
+                return value
+            except (RuntimeError, TimeoutError) as error:
+                self.log('控件树诊断：读取失败 attempt=%d 耗时=%.2fs 异常=%s'%(attempt+1,time.monotonic()-read_started,type(error).__name__))
+                # 只读请求允许恢复：AccessibilityNodeInfo 失效或整次抓取超时（真机偶发 47~90 秒卡死）。
+                recoverable=isinstance(error,TimeoutError) or any(token in str(error).lower() for token in ('accessibilitynodeinfo','请求超时','timed out','timeout of'))
+                if self.platform!='Android' or not recoverable:raise
+                if getattr(self,'visual_source_fallback',False):
+                    self._source_cooldown_until=time.monotonic()+60
+                    self.log('原生控件树 GET /source 读取失败（%.2f 秒），不重复请求；转备用观察。原因：%s'%(time.monotonic()-read_started,redact(str(error),self.secrets)[:300]))
+                    raise
                 if attempt==2:
                     package=getattr(self,'app_package','')
                     if not getattr(self,'allow_source_recovery',False) or not package or getattr(self,'source_recoveries',0)>=2:raise
@@ -146,7 +176,7 @@ class Explorer:
                     source=self.call('GET',self.base+'/source')
                     if hasattr(self,'recovery_events'):self.recovery_events.append({'type':'accessibility_recovered','message':'控件树连续读取失败，重新打开 App 后恢复。'})
                     return source
-                self.log('页面控件树正在重建，重试读取。')
+                self.log(f'页面控件树读取超时或暂不可用，正在重试（{attempt+1}/2）。')
                 time.sleep(.7)
 
     def wait_root_snapshot(self,route,package,timeout=20,allow_transition=False):
@@ -205,10 +235,15 @@ class Explorer:
     def find(self, selector):
         by=selector.get('by','accessibility id');value=selector.get('value','').strip()
         if not value:raise LoginBlocked('登录控件定位内容为空。')
-        if by not in ('accessibility id','id','xpath'):raise LoginBlocked('登录定位方式仅支持 accessibility id、id、xpath。')
+        if by=='target':
+            import app_adapter
+            node=app_adapter.resolve(parse_ui(self.source()),value,getattr(self,'adapter',None))
+            return self.find({'by':'xpath','value':node['path']})
+        if by not in ('accessibility id','id','xpath'):raise LoginBlocked('登录定位方式仅支持 accessibility id、id、xpath、target。')
         element=self.call('POST',self.base+'/element',{'using':by,'value':value})
         return element.get(ELEMENT) or element.get('ELEMENT')
     def tap(self,node):
+        self.native_context()
         self.auto_form_epoch=getattr(self,'auto_form_epoch',0)+1
         # Use native coordinate injection; adb's Java input command may time out under load.
         if self.platform=='Android':
@@ -246,20 +281,21 @@ class Explorer:
             pass
 
     def type(self,eid,text,node=None):
+        self.native_context()
         if self.platform=='Android' and node and node.get('bounds'):
-            # Delegate IME activation/restoration to Appium. Manual shell input
-            # followed by an immediate keyboard restore can truncate Flutter text.
+            # Set the fresh accessibility element directly. mobile: type uses
+            # adb input text through an IME and can hang on Android 16.
             self.tap(node)
             time.sleep(.5)
             fresh=self.find({'by':'xpath','value':node['path']})
-            self.call('POST',self.base+'/element/'+fresh+'/clear',{})
-            sent=self.call('POST',self.base+'/execute/sync',{'script':'mobile: type','args':[{'text':text}]})
+            sent=self.call('POST',self.base+'/execute/sync',{'script':'mobile: replaceElementValue','args':[{'elementId':fresh,'text':text}]})
             if sent is False:raise LoginBlocked('原生输入服务未接受文本，未继续提交。')
             time.sleep(.5)
             return
         self.call('POST',self.base+'/element/'+eid+'/clear',{})
         self.call('POST',self.base+'/element/'+eid+'/value',{'text':text})
     def back(self,nodes):
+        self.native_context()
         self.auto_form_epoch=getattr(self,'auto_form_epoch',0)+1
         if self.platform=='Android':
             # WebView Back may only change browser history. Prefer the App's header back control.
@@ -299,6 +335,7 @@ class Explorer:
         return after if signature(parse_ui(after))!=before else None
 
     def scroll(self):
+        self.native_context()
         rect=self.call('GET',self.base+'/window/rect');w=int(rect['width']);h=int(rect['height'])
         self.call('POST',self.base+'/actions',{'actions':[{'type':'pointer','id':'finger','parameters':{'pointerType':'touch'},'actions':[{'type':'pointerMove','duration':0,'x':w//2,'y':int(h*.75)},{'type':'pointerDown','button':0},{'type':'pointerMove','duration':600,'x':w//2,'y':int(h*.3)},{'type':'pointerUp','button':0}]}]})
 
@@ -308,24 +345,31 @@ class Explorer:
         success=config.get('success',{}).get('value','').strip()
         preset=config.get('flow')=='keenon_china'
         probe=getattr(self,'login_probe',None)
-        if preset and probe is None:raise LoginBlocked('接口登录验证未配置，需使用 Flutter 源码构建测试包。')
-        if not success and not preset:raise LoginBlocked('请填写登录成功标识，例如登录后首页独有的控件文字或 ID。')
+        verification=config.get('verification','auto')
+        use_probe=verification=='observer' or (verification=='auto' and preset and probe is not None)
+        if use_probe and probe is None:raise LoginBlocked('所选接口登录验证需要源码测试构建观察器')
+        if not use_probe and not success:raise LoginBlocked('旧包页面登录验证需要登录后唯一标识')
+        ui_previous=None;ui_stable=0
+        def ui_ready():
+            nonlocal ui_previous,ui_stable
+            observed=login_flow.ui_confirmation(self,config.get('success',{}))
+            ui_stable=ui_stable+1 if observed and observed==ui_previous else 1 if observed else 0
+            ui_previous=observed
+            return ui_stable>=2
+        if not use_probe:
+            for _ in range(2):
+                if ui_ready():return {'status':'confirmed','confirmation':'existing_session_ui','verification_level':'ui','backend_verified':False}
+                time.sleep(.3)
         self.log('开始登录：登录期间不截图、不保存页面结构。')
         if preset:
             login_flow.prepare(self)
-            probe.reset()
+            if use_probe:probe.reset()
         for text in ([] if preset else config.get('prepare',[])):
             if self.stopped():raise LoginBlocked('登录已停止。')
             matches=[n for n in parse_ui(self.source()) if n['clickable'] and n['label']==text]
             if len(matches)!=1:raise LoginBlocked('登录前按钮未唯一匹配，请检查文字或改用自定义步骤。')
             self.tap(matches[0])
             time.sleep(.7)
-        try:
-            if preset:raise LoginBlocked('内置流程每次重新验证登录接口')
-            self.find(config['success'])
-            self.log('已检测到登录成功标识，复用当前登录状态。')
-            return {'status':'confirmed','confirmation':'existing_session'}
-        except Exception:pass
         nodes=parse_ui(self.wait_ui())
         fields=[n for n in nodes if n['editable']]
         def locate(key, fallback):
@@ -334,10 +378,15 @@ class Explorer:
             if not fallback:raise LoginBlocked('未识别到'+{'account_selector':'账号输入框','password_selector':'密码输入框','submit_selector':'登录按钮'}[key]+'；请先配置进入登录页的操作，或展开高级登录定位。')
             return self.find({'by':'xpath','value':fallback['path']})
         secure=next((n for n in fields if n['secure']),None)
-        plain=next((n for n in fields if not n['secure']),None)
+        plain_fields=[n for n in fields if not n['secure']]
+        account_labels={'账号','account','请输入账号','enter account','邮箱','email','手机号','phone number'}
+        named=[n for n in plain_fields if any(login_flow.normalized(v) in account_labels for v in (n['label'],n.get('hint',''))) or n.get('label','').strip()==config['account'].strip()]
+        plain=named[0] if len(named)==1 else plain_fields[0] if len(plain_fields)==1 else None
         account=locate('account_selector',plain)
         if preset:
-            login_flow.fill_account(self,config['account'],config.get('account_selector'))
+            account_selector=config.get('account_selector') or {}
+            if not account_selector.get('value') and plain:account_selector={'by':'xpath','value':plain['path']}
+            login_flow.fill_account(self,config['account'],account_selector)
             login_flow.ensure_password(self)
             # App 在账号框首次失焦时会强制回退验证码模式（_onAccountFocusChanged）。
             # 先点一次密码框消耗掉这次回退，再重新切换密码登录，之后输入才稳定。
@@ -382,7 +431,7 @@ class Explorer:
                 if not login_flow.password_field(login_flow.wait_login_snapshot(self)):
                     raise LoginBlocked('密码输入后页面再次回退；未继续提交，请人工检查。')
         if preset:login_flow.dismiss_keyboard(self)
-        if preset and probe.read():
+        if use_probe and probe.read():
             self.log('已确认登录接口业务成功回调；页面已离开登录表单。')
             return {'status':'confirmed','confirmation':'login_api_success_callback'}
         nodes=parse_ui(self.source())
@@ -397,7 +446,7 @@ class Explorer:
             submit_deadline=time.monotonic()+15
             while True:
                 if self.stopped():raise LoginBlocked('登录已停止。')
-                if preset and probe.read():
+                if use_probe and probe.read():
                     self.log('已确认登录接口业务成功回调；页面已离开登录表单。')
                     return {'status':'confirmed','confirmation':'login_api_success_callback'}
                 nodes=parse_ui(self.source())
@@ -414,7 +463,7 @@ class Explorer:
         last_diag=0
         while time.monotonic()<deadline:
             if self.stopped():raise LoginBlocked('登录验证已停止。')
-            if preset:
+            if use_probe:
                 if probe.read():
                     self.log('已确认登录接口业务成功回调；不保存账号、密码或 Token。')
                     return {'status':'confirmed','confirmation':'login_api_success_callback'}
@@ -441,13 +490,30 @@ class Explorer:
                 time.sleep(.5)
                 continue
             try:
-                self.find(config['success'])
-                self.log('登录成功标识已确认，开始后续测试。')
-                return {'status':'confirmed','confirmation':'configured_element'}
+                if preset:login_flow.agree_dialog(self)
+                if not ui_ready():
+                    time.sleep(.5);continue
+                self.log('登录后页面状态已连续确认；未验证接口业务码。')
+                return {'status':'confirmed','confirmation':'configured_element','verification_level':'ui','backend_verified':False}
             except LoginBlocked:raise
             except Exception:time.sleep(1)
-        if preset:raise LoginBlocked('60 秒内未收到登录接口成功结果，未继续探索；请检查账号、网络或二次验证。')
-        raise LoginBlocked('未在 30 秒内找到登录成功标识。可能需要验证码、二次验证或账号配置有误；未继续探索。')
+        if use_probe:
+            try:
+                diagnostic_nodes=parse_ui(self.source(),include_disabled=True)
+                inputs=[n for n in diagnostic_nodes if n['editable']]
+                pw=login_flow.password_field(diagnostic_nodes)
+                value=pw.get('label','') if pw else ''
+                diagnostic={'account_matches':any(n['label']==config['account'] for n in inputs),
+                    'password_field_present':bool(pw),'password_nonempty':bool(value),
+                    'password_matches_or_mask_length':bool(value) and (value==config['password'] or (set(value)<=set('•●*·') and len(value)==len(config['password']))),
+                    'login_button_states':[{'enabled':n['enabled'],'clickable':n['clickable']} for n in diagnostic_nodes if re.fullmatch(r'登录|登 录|login|log in|sign in',n['label'].strip(),re.I)],
+                    'agreement_checked':[n['checked'] for n in diagnostic_nodes if 'CheckBox' in n['kind']],
+                    'known_dialog_controls':[n['label'] for n in diagnostic_nodes if n['label'].strip().casefold() in {'同意并登录','同意并继续','agree with','agree and log in','取消','cancel','确定','ok'}]}
+                self.login_timeout_diagnostic=diagnostic
+                self.log('登录未完成诊断（不含输入内容）：'+str(diagnostic))
+            except Exception:pass
+            raise LoginBlocked('60 秒内未收到登录接口成功结果，未继续探索；请检查账号、网络或二次验证。')
+        raise LoginBlocked('未在 60 秒内确认登录后唯一页面标识。可能需要验证码、二次验证或账号配置有误；未继续探索。')
 
     BUILTIN_STEP_ALIASES={'我的':['我的','Mine','My'],'通用设置':['通用设置','Common setting','General settings','Settings'],'语言':['语言','Language','Langue','Idioma','Sprache','言語','언어','Ngôn ngữ','Lingua']}
     def _step_labels(self,step):

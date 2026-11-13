@@ -1,4 +1,4 @@
-import tempfile, unittest
+import tempfile, unittest, shutil
 from pathlib import Path
 from unittest.mock import patch
 import app
@@ -27,17 +27,20 @@ class ToolTests(unittest.TestCase):
             app.JOBS['test'] = {'logs': [], 'screenshots': [], 'status': 'running'}
             def request(method, path, data=None):
                 if path == '/session':
-                    self.assertEqual(data['capabilities']['alwaysMatch']['appium:app'], str(artifact))
+                    session_apk=Path(data['capabilities']['alwaysMatch']['appium:app'])
+                    self.assertTrue(session_apk.is_relative_to(root/'.runtime'))
+                    self.assertEqual(session_apk.read_bytes(),b'test')
                     return {'sessionId': 'mock'}
                 if path.endswith('/screenshot'): return 'aGVsbG8='
                 if path.endswith('/source'):return '<hierarchy><node class="android.widget.Button" text="Home" clickable="true"/></hierarchy>'
-            with patch.object(app, 'ROOT', root), patch.object(app.shutil, 'which', return_value='/mock/flutter'), patch.object(app.cancellation.Control, 'run') as run, patch.object(app, 'request', request):
+            with patch.object(app, 'ROOT', root), patch.object(app.shutil, 'which', return_value='/mock/flutter'), patch.object(app.cancellation.Control, 'run') as run, patch.object(app, 'request', request), patch.object(app.host_runtime,'copy_source',side_effect=lambda src,dst,_:shutil.copytree(src,dst)), patch.object(app.source_navigation,'instrument',side_effect=ValueError('unsupported fixture')):
                 run.return_value.returncode = 0
                 run.return_value.stdout = run.return_value.stderr = ""
                 app.run_job('test', {'platform':'Android', 'device':'mock', 'source':str(project), 'entrypoint':'lib/main_eng.dart', 'steps':[]})
-                build_calls=[call for call in run.call_args_list if call.kwargs.get('cwd')==str(project)]
+                build_calls=[call for call in run.call_args_list if call.kwargs.get('cwd')==str(root/'.runtime/login-source-test')]
                 self.assertEqual(len(build_calls),1)
                 self.assertIn('build',build_calls[0].args[0])
+                self.assertEqual((project/'lib/main_eng.dart').read_text(),'void main() {}')
             self.assertEqual(app.JOBS['test']['status'], 'passed')
 
     def test_invalid_source_fails_before_build(self):

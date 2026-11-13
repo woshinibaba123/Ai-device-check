@@ -92,7 +92,7 @@ class JobDispatchTests(unittest.TestCase):
             def request(method,path,data=None):
                 if path=='/session':caps.append(data['capabilities']['alwaysMatch']);return {'sessionId':'fake','capabilities':{'appPackage':'com.test'}}
             with patch.object(app,'ROOT',root),patch.dict(app.JOBS,{'suite-test':job}),patch.object(app,'command',return_value={'ok':True,'output':''}),patch.object(app,'request',side_effect=request),patch.object(app,'raw_request'),patch.object(suite,'run',return_value=results) as run,patch.object(app.automation.Explorer,'login') as generic_login:
-                app.run_job('suite-test',{'platform':'Android','device':'fake','app':str(apk),'bundle':'com.test','test_mode':'cases','case_book':book,'flow_index':{'project':tmp,'pages':[],'translations':{}},'login_probe':'devicecheck-login-'+'a'*32+'.json','login':{'enabled':True,'flow':'keenon_china','account':'test','password':'secret'}})
+                app.run_job('suite-test',{'platform':'Android','device':'fake','execution_mode':'source','business_source':tmp,'reuse_test_build':True,'app':str(apk),'bundle':'com.test','test_mode':'cases','case_book':book,'flow_index':{'project':tmp,'pages':[],'translations':{}},'login_probe':'devicecheck-login-'+'a'*32+'.json','login':{'enabled':True,'flow':'keenon_china','account':'test','password':'secret'}})
             self.assertEqual(job['status'],'passed');run.assert_called_once();generic_login.assert_not_called()
             self.assertEqual(caps[0]['appium:newCommandTimeout'],0)
             self.assertFalse(caps[0]['appium:appWaitForLaunch'])
